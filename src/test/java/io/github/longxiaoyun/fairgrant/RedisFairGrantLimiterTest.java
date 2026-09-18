@@ -1,4 +1,4 @@
-package com.alibaba.fairgrant.limiter;
+package io.github.longxiaoyun.fairgrant;
 
 import com.github.fppt.jedismock.RedisServer;
 import org.junit.After;

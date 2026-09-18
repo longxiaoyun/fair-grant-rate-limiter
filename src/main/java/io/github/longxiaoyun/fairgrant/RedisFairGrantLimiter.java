@@ -1,4 +1,4 @@
-package com.alibaba.fairgrant.limiter;
+package io.github.longxiaoyun.fairgrant;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

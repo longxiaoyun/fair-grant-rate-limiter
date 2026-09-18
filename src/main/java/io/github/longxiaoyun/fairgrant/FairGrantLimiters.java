@@ -1,4 +1,4 @@
-package com.alibaba.fairgrant.limiter;
+package io.github.longxiaoyun.fairgrant;
 
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;

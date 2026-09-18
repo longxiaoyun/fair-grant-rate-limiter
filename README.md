@@ -43,7 +43,7 @@ Tests use [jedis-mock](https://github.com/fppt/jedis-mock); no external Redis is
 
 ```xml
 <dependency>
-  <groupId>com.alibaba.fairgrant</groupId>
+  <groupId>io.github.longxiaoyun</groupId>
   <artifactId>fair-grant-rate-limiter</artifactId>
   <version>1.0.0-SNAPSHOT</version>
 </dependency>
@@ -68,7 +68,7 @@ mvn -Pjdk17 clean test
 ## Quick start
 
 ```java
-import com.alibaba.fairgrant.limiter.*;
+import io.github.longxiaoyun.fairgrant.*;
 import redis.clients.jedis.JedisPool;
 
 FairGrantConfig config = FairGrantConfig.builder()
@@ -202,7 +202,7 @@ Lua scripts live under `src/main/resources/lua/`.
 ## Package layout
 
 ```
-com.alibaba.fairgrant.limiter
+io.github.longxiaoyun.fairgrant
 ├── FairGrantLimiter
 ├── RedisFairGrantLimiter
 ├── LocalShareFairGrantLimiter
@@ -252,4 +252,4 @@ Licensed under the [Apache License 2.0](LICENSE).
 ## Disclaimer
 
 This project is an independent open-source library.  
-Package coordinates currently use `com.alibaba.fairgrant` for historical reasons; they are **not** an official Alibaba product endorsement unless published under an Alibaba organization account.
+Package coordinates currently use `io.github.longxiaoyun` for historical reasons; they are **not** an official Alibaba product endorsement unless published under an Alibaba organization account.
