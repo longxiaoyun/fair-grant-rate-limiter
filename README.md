@@ -251,5 +251,5 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ## Disclaimer
 
-This project is an independent open-source library.  
-Package coordinates currently use `io.github.longxiaoyun` for historical reasons; they are **not** an official Alibaba product endorsement unless published under an Alibaba organization account.
+This is a personal open-source library under `io.github.longxiaoyun`.  
+It is not an official Alibaba product.
