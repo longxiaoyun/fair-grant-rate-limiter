@@ -16,15 +16,13 @@ Typical use case: many machines writing to the same cloud resource that enforces
 
 ## Problem
 
-| Approach | Shared quota | Fair across machines | Anti-starvation |
-|----------|--------------|----------------------|-----------------|
-| Local throttle (`rate / N`) | No (under-utilizes) | N/A | N/A |
-| Redis token bucket only | Yes | No (lucky JVMs win) | No |
-| Distributed lock + local bucket | Partial | No | No |
-| **Fair grant (this library)** | Yes | Yes | Yes |
+A cloud limit is usually “this table may commit 5 times per second”, not “each machine may commit 5 times”. The four approaches differ on three questions:
 
-Plain Redis rate limiting answers “is the global quota free?”.  
-This library also answers “**whose turn is it?**”.
+|  | Each machine limits itself (total ÷ machine count) | Everyone races for one token bucket | Grab a distributed lock first | **This library** |
+|--|--|--|--|--|
+| Can many machines together exceed the cloud limit? | No, but the quota is often wasted. Idle machines sit on their share | No. All machines share one bucket | Not guaranteed. A lock only stops two writers at once; it does not count total uses | No. All machines share one bucket |
+| Does the busiest machine keep winning? | No race. Each machine only has its own small share | Yes. Whoever calls more often gets the token | Yes. Whoever takes the lock submits first | No. The machine that has waited longest goes first |
+| Can some machine never get to submit? | Usually no, but every machine is slowed down | Yes. A quiet machine can lose forever | Yes. The lock does not remember who has been waiting | No. A miss moves that machine to the front next time |
 
 ---
 
