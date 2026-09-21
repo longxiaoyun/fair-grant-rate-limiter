@@ -11,17 +11,26 @@
 
 ![10s 窗口里最多发放 6 个令牌，多台机器按顺序获取](docs/images/allocation.zh-CN.svg)
 
+## 选择接入方式
+
+`main` 同时维护两种接入方式，共用同一份核心实现，不需要切换分支。两个包使用相同的发布版本。
+
+| 项目类型 | 添加的依赖 | 接入文档 |
+|---|---|---|
+| Spring Boot（首页默认） | `fair-grant-spring-boot-starter`，自动引入核心库 | [Spring Boot](spring-boot-starter/README.zh-CN.md) |
+| 普通 Java / 非 Spring 项目 | `fair-grant-rate-limiter`，不引入 Spring | [普通 Java](docs/java-quickstart.zh-CN.md) |
+
 ## 先跑起来
 
-准备 Java 8+、Maven、Redis 5+ 和 Python 3.8+，然后在仓库根目录运行：
+准备 Java 17+、Maven、Redis 6+ 和 Python 3.8+，然后在仓库根目录运行 Spring Boot 示例：
 
 ```bash
-python3 examples/quickstart/run.py
+python3 examples/spring-boot/run.py
 ```
 
-脚本会构建库和独立示例项目，启动临时 Redis 和 **3 个 Java 进程**。三个进程各执行 4 次任务，共享 **10s／6 个令牌**的限制；你可以看到实际发放顺序和验证结果。结束后自动关闭测试服务，不使用已有 Redis。
+脚本启动临时 Redis 和 **3 个 Spring Boot 进程**，每个进程执行 3 次 HTTP 操作，验证公平分发和 **2s 窗口里最多发放 4 个令牌**。结束后自动关闭测试服务。
 
-[示例源码与更多场景](examples/quickstart/README.md) · [30 个进程、业务失败重试等验证](examples/quickstart/README.md#场景测试)
+[Spring Boot 示例](examples/spring-boot/README.md) · [普通 Java 示例（Java 8+）](examples/quickstart/README.md)
 
 ## Spring Boot 接入
 

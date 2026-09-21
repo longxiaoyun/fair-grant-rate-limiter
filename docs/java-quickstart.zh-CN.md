@@ -2,6 +2,10 @@
 
 [返回首页](../README.zh-CN.md)
 
+普通 Java 接入与 Spring Boot starter 在同一个 `main` 分支维护，共用核心实现和发布版本。只依赖下方核心包即可，不需要 Spring，也无需安装 starter。
+
+[运行普通 Java 多进程示例](../examples/quickstart/README.md)。
+
 ## 接到自己的代码里
 
 先执行 `mvn install -DskipTests`，再添加依赖（暂未发布到 Maven Central）：
