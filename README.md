@@ -23,43 +23,57 @@ The script builds the library and a standalone consumer, starts temporary Redis 
 
 [Standalone example and scenarios](examples/quickstart/README.md)
 
-## Use it in your application
+## Spring Boot integration
 
-Run `mvn install -DskipTests` first, then add the dependency (not yet on Maven Central):
+Add the starter, configure the quota in YAML, and inject it. Spring manages the pool and shutdown.
+
+Not yet on Maven Central; install from the repository root first:
+```bash
+mvn install -DskipTests
+mvn -f spring-boot-starter/pom.xml install -DskipTests
+```
 
 ```xml
 <dependency>
   <groupId>io.github.longxiaoyun</groupId>
-  <artifactId>fair-grant-rate-limiter</artifactId>
+  <artifactId>fair-grant-spring-boot-starter</artifactId>
   <version>1.0.0-SNAPSHOT</version>
 </dependency>
 ```
 
-```java
-import io.github.longxiaoyun.fairgrant.*;
-
-FairGrantConfig config = FairGrantConfig.builder()
-    .ratePerSec(0.5).burst(1)
-    .slidingWindow(10_000L, 6)
-    .build();
-
-// Create once per process. All processes connect to the same Redis.
-RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
-FairGrantExecutor executor = new FairGrantExecutor(limiter);
-
-AcquireResult result = executor.tryExecute("table-a", "node-a", () -> {
-    // Execute one prepared operation, such as committing a batch.
-    System.out.println("Execute task");
-});
-
-if (!result.isGranted()) {
-    // WAIT: retain the task and reschedule using result.getRetryAfterMs().
-    // ERROR: retain the task and investigate result.getDetail(); do not execute it.
-}
-// Call limiter.close() when the application shuts down.
+```yaml
+fair-grant:
+  rate-per-sec: 0.5
+  burst: 1
+  window: 10s
+  max-permits: 6
+  redis:
+    host: 127.0.0.1
+    port: 6379
 ```
 
-Use the same **resourceKey** for operations sharing quota (`table-a` above), and a distinct, stable **clientId** for each process (`node-a`). Each business retry must acquire a new token.
+```java
+import io.github.longxiaoyun.fairgrant.*;
+import io.github.longxiaoyun.fairgrant.springboot.FairGrantOperations;
+import org.springframework.stereotype.Service;
+
+@Service
+public class BatchWriter {
+    private final FairGrantOperations grants;
+
+    public BatchWriter(FairGrantOperations grants) { this.grants = grants; }
+
+    public AcquireResult submit(String table, FairGrantExecutor.Action commitBatch) throws Exception {
+        return grants.tryExecute(table, commitBatch);
+    }
+}
+```
+
+Call `submit("table-a", () -> commitPreparedBatch())`. On `WAIT`, retain the task and retry after `getRetryAfterMs()`; investigate `ERROR` without executing it. The starter does not retry business operations automatically.
+
+Operations sharing quota use the same `resourceKey`. Each application instance gets its own default `clientId`; no manual node name or `close()` call is needed.
+
+[Spring Boot example and configuration](spring-boot-starter/README.md) · [Plain Java integration](docs/java-quickstart.en.md)
 
 ## Further reading
 

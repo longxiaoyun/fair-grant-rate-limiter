@@ -1,0 +1,48 @@
+name: Spring Boot
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+jobs:
+  integration:
+    name: Boot ${{ matrix.boot }} / Java ${{ matrix.java }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {boot: '2.7.18', java: '8'}
+          - {boot: '3.5.16', java: '17'}
+          - {boot: '4.1.1', java: '17'}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - name: Install core and test auto-configuration
+        run: |
+          mvn -B -DskipTests install
+          mvn -B -f spring-boot-starter/pom.xml -Dspring-boot.version=${{ matrix.boot }} clean test
+      - name: Build isolated Redis
+        run: |
+          mkdir -p "$RUNNER_TEMP/boot-redis"
+          cd "$RUNNER_TEMP/boot-redis"
+          curl --fail --location --retry 3 https://download.redis.io/releases/redis-7.2.7.tar.gz -o redis.tar.gz
+          tar -xzf redis.tar.gz
+          cd redis-7.2.7
+          make -j2 MALLOC=libc redis-server
+          echo "$PWD/src" >> "$GITHUB_PATH"
+      - name: Run packaged consumers with Boot-managed dependencies
+        run: python3 examples/spring-boot/run.py --boot-version ${{ matrix.boot }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boot-${{ matrix.boot }}-java-${{ matrix.java }}
+          path: |
+            spring-boot-starter/target/**/surefire-reports/
+            examples/spring-boot/target/build.log
+            examples/spring-boot/target/run-*/
+            examples/spring-boot/target/latest-report.json
