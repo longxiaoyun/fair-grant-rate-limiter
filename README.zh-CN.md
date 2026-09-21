@@ -5,34 +5,72 @@
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-多个 JVM 共用一份令牌桶；有多个客户端等待时，按排队顺序轮流发许可。
+**一个 Java 限流库，让多个程序共用一个调用速率，并让正在等待的程序按顺序获得调用机会。**
 
-适用于多个写入进程共享一张表的提交速率等场景。库只管理额度、等待队列和请求回执，不搬运业务数据，也不调用云 API。
+例如，3 个程序使用同一个账号调用第三方接口：你希望它们加起来平均每秒调用 5 次，而且每个有任务的程序都能轮到。Fair Grant 就放在每次接口调用之前，判断“这次可以调用”还是“需要稍后再试”。
 
-## 保证与边界
+你通过 Maven 把它引入各个 Java 程序，再让它们连接同一个 Redis 即可，无需部署额外的 Fair Grant 服务。
 
-- **速率**：正常 Redis 路径上，长度为 `t` 秒的区间最多发放约 `burst + ratePerSec × t` 个新许可。令牌桶允许突发，**不是任意一秒最多 N 次的滑动窗口限流器**。
-- **公平**：仍在租约期内的等待客户端按 FIFO 排队。获得一次许可后退出队列，有新请求再排到队尾。公平按 `clientId`，不是按线程或业务请求。
-- **存活**：等待客户端通过重试或 `registerPending` 续租。崩溃后，下一次获取/登记会清除过期的等待成员，不依赖进程主动退出。
-- **幂等**：显式 `requestId` 只在 `permitTtlMs` 回执保留期内避免重复扣费；它不能保证业务调用只执行一次。
-- **失败**：默认 `DENY`，Redis 不可用时返回 `WAIT`。选择 `LOCAL_SHARE` 或 `ALLOW` 后，就接受失去严格共享配额保证。
+## 它具体解决什么问题？
 
-发放许可与真正发出业务请求是两件事：拿到许可后应及时执行，不能先囤许可再集中提交。业务超时后如果要再发一次云 API 请求，应申请新许可、使用新 `requestId`；业务幂等键可以保持不变。
+假设你有 3 个 Java 程序，都在调用同一个**文档识别接口**：每次上传一个文件，得到识别结果。它们使用同一个第三方账号。
 
-Redis 状态丢失、异步复制故障切换、两个独立 Redis、客户端混合使用不同版本，均可能使共享配额失真。该库不是 Redis 故障下的强一致配额系统。
+| 程序 | 工作内容 | 等待识别的文件 |
+|---|---|---|
+| A | 历史文件批量处理 | 1000 个 |
+| B | 今天新增的文件 | 10 个 |
+| C | 用户临时上传的文件 | 10 个 |
 
-## 环境与安装
+你给这个账号设定了两个要求：
 
-- Java 8+；默认构建产物为 Java 8 字节码。
-- Redis 5+，需要 `TIME`、`EVAL` / `EVALSHA` 权限；Jedis 4.4.6。
-- 应用提供 SLF4J 实现。
-- 当前工厂接受 `JedisPool`，支持单节点连接；不提供 `JedisCluster` 客户端适配。
+1. **控制总速率**：A、B、C 加起来平均每秒发起 5 次调用。
+2. **让各个程序都有机会**：A 的任务很多，也不能因为它反复申请额度，就一直让 B、C 等着。
 
-尚未发布到 Maven Central，先在仓库运行：
+仅在各程序内部限流，无法同时满足这两个要求：
 
-```bash
-mvn clean install
-```
+| 做法 | 在这个例子里会怎样？ |
+|---|---|
+| 每个程序各限每秒 5 次 | 3 个程序加起来可能达到每秒 15 次，超过你设定的总速率。 |
+| 每个程序固定分到总额度的三分之一 | B、C 做完任务后，A 仍只能使用自己那一份，剩下的额度空闲。 |
+| 大家共用一个只负责扣额度的限流器 | 总速率可以控制，但没有规定下一次该轮到哪个程序；申请更频繁的程序可能拿走更多机会。 |
+
+Fair Grant 在**共享总额度**的基础上，增加了**等待顺序**。
+
+### 接入后会发生什么？
+
+A、B、C 每次准备调用识别接口时，都先向 Fair Grant 申请一次调用机会。这里的一次机会叫作一个“许可”，它对应一次接口调用，与文件大小、页数无关。
+
+假设三个程序已按 A、B、C 的顺序进入等待队列，并持续为后续任务排队：
+
+| 下一次可用的调用机会 | 给谁 | 然后发生什么 |
+|---|---|---|
+| 第 1 次 | A | A 调用接口处理一个文件；还有文件要处理，就重新排到队尾。 |
+| 第 2 次 | B | B 处理一个文件，再排到队尾。 |
+| 第 3 次 | C | C 处理一个文件，再排到队尾。 |
+| 第 4 次 | A | 轮到 A 的下一个文件。 |
+
+这是排队顺序示意，实际发放还要等额度可用。B、C 没有待处理任务后，就不再占用等待位置；A 可以独自使用可用额度，不必继续保留三分之二给空闲程序。
+
+库不会替你处理文件。它返回“允许”后，**由你的程序调用第三方接口**；返回“等待”时，文件留在程序自己的任务队列里，由程序稍后再次申请。库不会后台唤醒任务。
+
+## 什么情况下适合用？
+
+当你的场景同时符合下面两点时，它比较合适：
+
+- 多个 Java 进程调用同一个受限对象，例如同账号的第三方 API，或同一张表的提交接口。
+- 除了限制总调用速率，你还希望各个有待办任务的进程能按顺序获得机会。
+
+它管理的是**调用次数**，不限制同时执行的任务数，也不限制数据量。任务队列、业务执行和失败重试仍由应用负责。只有一个进程需要限流时，通常用本地限流器即可。
+
+速率通过令牌桶实现，可以允许短时间突发。若对方要求严格的“任意一秒最多 5 次”，需要先核对是否匹配它的计数规则；本库不提供严格滑动窗口计数。下例设 `burst=1`，以减少连续放行。
+
+## 怎么接入？
+
+需要 Java 8+ 和 Redis 5+。当前使用 Jedis 连接单节点 Redis，不提供 Redis Cluster 客户端适配。
+
+### 1. 安装依赖
+
+包尚未发布到 Maven Central。先在本仓库执行 `mvn clean install`，再在应用的 `pom.xml` 中加入：
 
 ```xml
 <dependency>
@@ -42,156 +80,72 @@ mvn clean install
 </dependency>
 ```
 
-## 使用
+应用还需提供 SLF4J 日志实现。
 
-进程内共用一个 limiter。`clientId` 应在进程生命周期内稳定，且在共享同一资源的各个进程之间唯一；同机多 JVM 不应仅使用 IP，可用启动时生成并保存的 UUID。
+### 2. 在程序启动时创建 limiter
+
+三个程序使用相同的配置和 Redis 地址；每个程序创建一个 limiter，并在进程内共用。
 
 ```java
+import io.github.longxiaoyun.fairgrant.*;
+import java.util.UUID;
+
 FairGrantConfig config = FairGrantConfig.builder()
-    .keyPrefix("odps:fair:")
-    .ratePerSec(5.0)
-    .burst(5.0)
-    .pendingTtlMs(5_000L)
-    .permitTtlMs(20_000L)
-    .fallbackMode(FairGrantConfig.FallbackMode.DENY)
+    .ratePerSec(5.0) // 这个账号的总速率，不是每个程序各 5 次
+    .burst(1.0)     // 最多积攒 1 次调用机会，避免集中发起一批调用
     .build();
 
-RedisFairGrantLimiter limiter = FairGrantLimiters.redis(jedisPool, config);
-String clientId = UUID.randomUUID().toString(); // 进程启动时生成一次
-String resourceKey = "my_project:my_table";
+// 本地演示地址；部署时让所有程序连接同一个 Redis 服务。
+RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
 
-AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
-if (result.isGranted()) {
-    commitTable();
-} else {
-    // 保留本地批次，调度器在 result.getRetryAfterMs() 后重试。
-}
-// 仅当整个进程对该资源没有等待工作时：
-// limiter.clearPending(resourceKey, clientId);
+String clientId = UUID.randomUUID().toString(); // 每个进程启动时生成一次
+String resourceKey = "document-api:account-001"; // 这份总额度对应的接口和账号
 ```
 
-也可以 `tryAcquire("my_project", "my_table", clientId)`。资源名会 trim 并转为小写，`MyTable` 与 `mytable` 共用配额；大小写有不同语义的资源不适用此约定。
+两个名字各有用途：
 
-### 普通调用与请求重试
+| 参数 | 在例子里的含义 | 各程序应该怎么填？ |
+|---|---|---|
+| `resourceKey` | “文档识别接口 + account-001 账号”的共同额度 | A、B、C 填相同值，才能共用一份额度。 |
+| `clientId` | 正在申请调用机会的是哪个程序 | A、B、C 各不相同；每个进程运行期间保持不变。 |
 
-`tryAcquire` **每次调用都申请新额度**。同一个 `clientId` 的两个并发线程如果都成功，会扣除两个令牌，不共享一个进程级许可。
+资源名会转为小写。另一个独立账号可以使用另一个 `resourceKey`，获得独立额度。
 
-如果需要在 Redis 响应丢失后重试同一次获取，使用新方法：
+### 3. 在每次业务调用之前申请许可
 
 ```java
-// 在业务批次/调用尝试对象上保存，不能在每次 Redis 重试时重新生成。
-String requestId = UUID.randomUUID().toString();
-AcquireResult result = limiter.tryAcquireRequest(resourceKey, clientId, requestId);
+AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
+
+if (result.isGranted()) {
+    callRecognitionApi(document);              // 现在可以调用接口，处理这个文件
+} else if (result.getStatus() == AcquireResult.Status.ERROR) {
+    reportLimiterError(result.getDetail());     // 配置或 Redis 数据异常，需要排查
+} else {
+    retryLater(document, result.getRetryAfterMs()); // 保留文件，到建议时间再申请
+}
 ```
 
-- 不同的受限业务调用必须使用不同 `requestId`。
-- 同一次获取重试使用原 ID；已有回执会返回 `GRANTED / existing_permit`，不重复扣费。
-- 回执从首次获准时开始计时，重试不会延长保留期。超过 `permitTtlMs` 后，库不再记得该 ID，可能再次扣费。
-- 在应用层设置比回执保留期更短的获取重试期限。不要把旧 ID 当成永久幂等键。
-- 同一 ID 不能由多个线程独立执行业务。`existing_permit` 表示获取回执重放，不表示业务尚未执行；业务执行去重由调用方负责。
-- 不需要释放许可。旧的 `invalidatePermit` 已废弃并变为无操作；回执保留到 TTL 到期，避免迟到的清理删除新回执。
+`callRecognitionApi`、`reportLimiterError` 和 `retryLater` 代表你自己的业务代码。`tryAcquire` 返回结果，不会在方法里睡眠等待额度。
 
-### 等待与退出
+每次获准对应一次业务调用，无需释放许可。若程序取消了等待任务，且该资源已经没有其他等待工作，调用 `limiter.clearPending(resourceKey, clientId)` 退出排队。程序退出时调用 `limiter.close()` 关闭这里创建的 Redis 连接池。
 
-1. `tryAcquire` / `tryAcquireRequest` 自动加入或续租等待队列；也可提前调用 `registerPending`。
-2. `WAIT` 是非阻塞结果。建议重试时间不会超过本次等待租约的一半，低速率下也需要定期续租。
-3. 获得许可即完成这一轮排队，正在执行业务的客户端不会占住队首。持续有工作时，及时为下一次获取排队。
-4. 租约过期后重新加入会排到队尾；长时间 GC、暂停、网络延迟超过租约，可能失去排队位置。
-5. 取消等待时调用 `clearPending`。它只退出队列，不退还令牌、不删除回执、不重置本地冷却时间。
-6. 多线程共享 `clientId` 时，由统一的队列管理者判断是否空闲；单个线程不能在其他线程仍等待时清理整个客户端。
+默认情况下，Redis 不可用时返回 `WAIT`，暂停发起新的业务调用。程序若崩溃而没退出排队，其等待位置会在租约过期后由后续访问清理，默认租约为 5 秒。
 
-`registerPending` / `clearPending` 的 Redis 失败会记录日志；遗留等待成员最终靠租约清理。它们不是业务事务。
+## 进一步使用
 
-### 返回值
+上面的普通调用每次成功都会消耗一次额度。如果 Redis 的响应丢失，想重试**同一次许可申请**，可以使用带 `requestId` 的 `tryAcquireRequest`。它与业务接口失败后的重新调用是两件事，具体见调用参考。
 
-| 状态 | `isGranted()` | 含义 |
-|---|---|---|
-| `GRANTED` | true | Redis 发放的新许可或同请求回执 |
-| `WAIT` | false | 缺令牌、尚未轮到、Redis 拒绝降级或本地份额已用完 |
-| `DEGRADED_LOCAL` | true | Redis 失败后，所选降级策略允许执行；重试间隔为 0 |
-| `ERROR` | false | 配置冲突、Redis 数据/脚本错误或异常结果，需要排查 |
+- [配置、获取重试、故障策略与实现原理](docs/reference.zh-CN.md)
+- [从旧 SNAPSHOT 升级](docs/reference.zh-CN.md#从旧-snapshot-升级)：新版采用不同的 Redis 数据格式，新旧客户端不能混跑。
+- [英文说明](README.md)
 
-## 设计
-
-一次 Lua 调用原子完成：
-
-1. 校验资源已有的 `rate` / `burst` 与调用方相同。
-2. 如该请求有回执，返回原获准状态。
-3. 按 Redis 时间删除过期租约，把新等待客户端分配到递增序号的队尾，续租。
-4. 按 Redis 时间补令牌；桶时间戳只前进，服务器时钟回拨期间不重复计算时间。
-5. 令牌足够且轮到调用方时扣 1 个，写请求回执，并退出本轮等待。
-
-队列使用序号而非毫秒时间作分数，同一毫秒内不会按 clientId 字典序反复选同一个客户端。取队首使用 `ZRANGE 0 0`；过期成员在后续获取/登记时惰性清理。
-
-版本化 Redis key 的基础部分为 `{prefix}v2:{<base64url(resource)>}:`（尖括号是占位符，花括号是 key 的实际字符）：
-
-| 后缀 | 类型 | 内容 |
-|---|---|---|
-| `bucket` | hash | `tokens`、`ts`、`seq`、`rate`、`burst` |
-| `wait` | zset | clientId → FIFO 序号 |
-| `pending` | zset | clientId → 等待租约过期时间 |
-| `permit:<base64url(client)>:<base64url(request)>` | string + TTL | 发放许可的 Redis 毫秒时间 |
-
-编码使用 UTF-8、URL 安全 Base64、不带 padding，避免 client/request 中的分隔符造成 key 碰撞。默认前缀下，同一资源 key 具有相同 hash tag；这不意味着当前 Java 客户端已支持 Redis Cluster。
-
-桶保留速率历史，不自动过期；本地 fallback 也按资源保留状态。高基数、一次性资源需要应用规划清理生命周期。不能在客户端仍会重试或冷却尚未结束时随意删桶；删除会重置初始突发额度。闲置资源的过期等待成员会在下一次访问时清理。
-
-## 配置
-
-| 选项 | 默认 | 说明 |
-|---|---|---|
-| `keyPrefix` | `fair:grant:` | 应用隔离前缀 |
-| `ratePerSec` | 5 | 有限正数；资源所有 JVM 共用的平均速率 |
-| `burst` | `max(1, ratePerSec)` | 有限且至少为 1；最大突发容量 |
-| `pendingTtlMs` | 5000 | 等待租约；应覆盖正常调度、Redis 请求延迟与 GC 抖动 |
-| `permitTtlMs` | 20000 | 请求回执保留期；不是业务锁超时 |
-| `fallbackMode` | `DENY` | Redis 不可用时的策略 |
-| `writerNodes` | 10 | 仅用于 LOCAL_SHARE 的估计进程数 |
-| `redisTimeoutMs` | 200 | 工厂连接池超时及 DENY 建议重试间隔 |
-
-同一资源的所有 JVM 必须使用相同 rate 和 burst，否则返回 `ERROR / config_mismatch`。修改这两项需先停止并排空该资源的调用，再协调重建桶；不能靠混用不同配置动态修改。
-
-### Redis 不可用
-
-| 策略 | 行为 |
-|---|---|
-| `DENY` | 默认，返回 WAIT |
-| `LOCAL_SHARE` | 单 limiter 实例按 `ratePerSec / writerNodes` 发放，本地拒绝仍返回 WAIT |
-| `ALLOW` | 全部放行，仅适用于明确接受超限的业务 |
-
-LOCAL_SHARE 使用 `System.nanoTime()` 和原子化的资源状态，`clearPending` 不重置冷却。单进程使用多个 limiter 实例会得到多份本地额度。Redis 部分故障、恢复切换、实际进程数超过估计或各实例同时首次降级时，均不能保证全局速率。Redis 与本地的幂等记录不共享，跨降级切换也没有统一幂等保证。
-
-Redis WRONGTYPE、ACL 拒绝等数据/脚本错误返回 ERROR，不通过 ALLOW 掩盖。Lua 使用 EVALSHA，缓存丢失后退回 EVAL；不会在成功发放后再依赖一次 SCRIPT LOAD 成功。
-
-## 从旧 SNAPSHOT 升级
-
-这是一次有行为变化的修复，**不支持新旧客户端混跑**：旧 key 与 `v2` key 是两个独立桶，混跑会双重放行。
-
-1. 停止旧客户端获取许可，排空已获准的业务请求。
-2. 等待旧桶恢复初始突发额度所需的时间（保守取 `burst / ratePerSec` 秒），并确认旧请求不会继续执行或重试。
-3. 一次性切换所有客户端。继续使用普通 tryAcquire 的业务每次成功都会扣一个令牌；需要获取幂等时迁移到 tryAcquireRequest。
-4. 删除旧的 invalidatePermit 调用；clearPending 仅用于取消剩余等待。
-5. 明确选择降级策略，默认已由 LOCAL_SHARE 改为 DENY。
-6. 旧 key 确认无客户端使用后再由运维清理，库不会自动删旧数据。
-
-## 构建和端到端验证
+## 开发与测试
 
 ```bash
-mvn clean test                     # 单元测试 + jedis-mock 合约回归
-mvn -Preal-redis clean verify       # 上述测试 + 独立真实 Redis + 多 JVM HTTP 端到端
-mvn -Preal-redis -Dredis.server=/absolute/path/redis-server clean verify
+mvn clean test                # 单元测试与模拟 Redis 测试
+mvn -Preal-redis clean verify  # 再加真实 Redis 和多 JVM 端到端测试
 ```
 
-真实测试需要本机可执行的 `redis-server` 和回环端口权限；测试自行分配端口、启动临时实例、关闭持久化，并在结束时停止进程，不接入现有 Redis。不具备环境时测试会失败，不静默跳过。日志在 `target/redis-it-*` 与 `target/worker-*`。
+第二条命令需要本机安装 `redis-server`。测试会启动临时 Redis 和 4 个独立 JVM，让它们实际执行 40 次测试 HTTP 调用，检查总额度和排队顺序。详见[验证说明](docs/reference.zh-CN.md#构建和端到端验证)。
 
-端到端场景启动 4 个独立 JVM，共享一份 rate=20、burst=2 的额度，执行 40 次不同的 HTTP 提交，重放 40 次获取回执，验证每个客户端完成 10 次、初始等待队列公平、每个发放时间区间均不超过令牌桶预算。
-
-真实 Redis 测试还覆盖停机/恢复、三种故障策略、租约过期、同身份并发、响应丢失重试、SCRIPT FLUSH、时钟回拨保护、小数速率、错误配置及脚本错误。CI 在 Java 8/11/17 上运行；独立任务覆盖 Redis 5 与 7。
-
-Java 版本 profile `jdk8` / `jdk11` / `jdk17` 保留用于兼容性验证；高版本 profile 生成对应版本字节码，发布 Java 8 兼容 jar 应使用默认构建或 jdk8。
-
-## 贡献与许可证
-
-修改发放逻辑请补回归测试，并运行 `mvn -Preal-redis clean verify`。源码保持 Java 8 兼容。
-
-[Apache License 2.0](LICENSE)。个人开源项目，不是阿里巴巴产品。
+欢迎提交 Issue 和 PR。[Apache License 2.0](LICENSE)。
