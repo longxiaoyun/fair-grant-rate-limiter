@@ -11,7 +11,7 @@ Built with Java, Redis and Lua. Machines accessing the same resource share a tok
 
 ## How are tokens distributed?
 
-This example uses a quota of six grants per resource in any ten seconds to show how three machines share tokens. Each token permits one operation; enable the window with `slidingWindow(10_000L, 6)`.
+Machines A, B and C share one token bucket: **at most 6 tokens in a 10s window**. Each token permits one operation. Configure this window with `slidingWindow(10_000L, 6)`.
 
 ![Three machines share six tokens: ready clients take turns and idle clients reserve no quota](docs/images/allocation.en.svg)
 
