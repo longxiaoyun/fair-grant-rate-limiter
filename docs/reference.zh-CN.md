@@ -157,4 +157,4 @@ Java 版本 profile `jdk8` / `jdk11` / `jdk17` 保留用于兼容性验证；高
 
 修改发放逻辑请补回归测试，并运行 `mvn -Preal-redis clean verify`。源码保持 Java 8 兼容。
 
-[Apache License 2.0](../LICENSE)。个人开源项目，不是阿里巴巴产品。
+[Apache License 2.0](../LICENSE)。
