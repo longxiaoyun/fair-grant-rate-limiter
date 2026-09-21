@@ -2,7 +2,7 @@
 
 [返回项目介绍](../README.zh-CN.md) · [English](reference.md)
 
-首次了解项目，请先读 README 的业务例子和接入步骤。本页供接入时查配置、处理重试与故障，以及升级旧版本时使用。
+首次了解项目，请先读 README 的业务例子和接入步骤。本页供接入时查配置、处理重试与故障，以及升级旧版本时使用。Kafka 多表消息、本地攒批和同表提交的业务背景见 README；[本轮场景评审](scenario-review.zh-CN.md)记录了 75 次／15 秒限制的验证缺口。
 
 ## 配置
 
@@ -54,7 +54,7 @@ AcquireResult result = limiter.tryAcquireRequest(resourceKey, clientId, requestI
 
 ### 等待与退出
 
-1. `tryAcquire` / `tryAcquireRequest` 自动加入或续租等待队列；也可提前调用 `registerPending`。
+1. `tryAcquire` / `tryAcquireRequest` 自动加入或续租等待队列；`registerPending` 只能用于已经具备提交条件的批次；不能因为内存里已有少量数据，就让尚未攒好的批次占位。
 2. `WAIT` 是非阻塞结果。建议重试时间不会超过本次等待租约的一半，低速率下也需要定期续租。
 3. 获得许可即完成这一轮排队，正在执行业务的客户端不会占住队首。持续有工作时，及时为下一次获取排队。
 4. 租约过期后重新加入会排到队尾；长时间 GC、暂停、网络延迟超过租约，可能失去排队位置。
@@ -131,6 +131,8 @@ mvn -Preal-redis -Dredis.server=/absolute/path/redis-server clean verify
 真实测试需要本机可执行的 `redis-server` 和回环端口权限；测试自行分配端口、启动临时实例、关闭持久化，并在结束时停止进程，不接入现有 Redis。不具备环境时测试会失败，不静默跳过。日志在 `target/redis-it-*` 与 `target/worker-*`。
 
 端到端场景启动 4 个独立 JVM，共享一份 rate=20、burst=2 的额度，执行 40 次不同的 HTTP 提交，重放 40 次获取回执，验证每个客户端完成 10 次、初始等待队列公平、每个发放时间区间均不超过令牌桶预算。
+
+新增的 `MaxComputeScenarioIT` 用真实 Redis 模拟 30 个逻辑消费节点：混合表消息分入独立本地批次，tableA 轮流获得令牌，tableB 额度独立，并验证高频节点不能越过等待者。该模拟没有 Kafka broker，也没有 ODPS SDK；窗口限额和实际 Commit 重试仍需在真实链路验证。
 
 真实 Redis 测试还覆盖停机/恢复、三种故障策略、租约过期、同身份并发、响应丢失重试、SCRIPT FLUSH、时钟回拨保护、小数速率、错误配置及脚本错误。CI 在 Java 8/11/17 上运行；独立任务覆盖 Redis 5 与 7。
 
