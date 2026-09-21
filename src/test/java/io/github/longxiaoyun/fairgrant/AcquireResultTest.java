@@ -29,12 +29,16 @@ public class AcquireResultTest {
 
     @Test
     public void degradedLocalIsGranted() {
-        AcquireResult r = AcquireResult.degradedLocal(100L, "redis_down");
+        AcquireResult r = AcquireResult.degradedLocal(0L, "redis_down");
         assertEquals(AcquireResult.Status.DEGRADED_LOCAL, r.getStatus());
         assertTrue(r.isGranted());
-        assertEquals(100L, r.getRetryAfterMs());
+        assertEquals(0L, r.getRetryAfterMs());
     }
 
+    @Test public void degradedWaitIsNeverGranted() {
+        assertFalse(AcquireResult.degradedLocal(100L, "waiting").isGranted());
+        assertFalse(new AcquireResult(AcquireResult.Status.DEGRADED_LOCAL, 100, 0, "waiting").isGranted());
+    }
     @Test
     public void errorDefaultsRetry() {
         AcquireResult r = AcquireResult.error("boom");

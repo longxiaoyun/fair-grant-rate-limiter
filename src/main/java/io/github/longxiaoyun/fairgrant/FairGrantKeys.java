@@ -1,46 +1,31 @@
 package io.github.longxiaoyun.fairgrant;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Locale;
 
 final class FairGrantKeys {
-
     private final String prefix;
-
-    FairGrantKeys(String prefix) {
-        this.prefix = prefix == null ? "fair:grant:" : prefix;
-    }
+    FairGrantKeys(String prefix) { this.prefix = prefix == null ? "fair:grant:" : prefix; }
 
     String normalizeResource(String resourceKey) {
-        if (resourceKey == null) {
-            throw new IllegalArgumentException("resourceKey is null");
-        }
-        String k = resourceKey.trim();
-        if (k.isEmpty()) {
-            throw new IllegalArgumentException("resourceKey is blank");
-        }
-        return k.toLowerCase(Locale.ROOT);
+        return requireId(resourceKey, "resourceKey").toLowerCase(Locale.ROOT);
     }
-
     String resourceKey(String project, String table) {
-        if (project == null || table == null) {
-            throw new IllegalArgumentException("project/table is null");
-        }
-        return normalizeResource(project.trim() + ":" + table.trim());
+        return normalizeResource(requireId(project, "project") + ":" + requireId(table, "table"));
     }
-
-    String bucket(String resource) {
-        return prefix + resource + ":bucket";
+    static String requireId(String value, String name) {
+        if (value == null || value.trim().isEmpty()) throw new IllegalArgumentException(name + " is blank");
+        return value.trim();
     }
-
-    String wait(String resource) {
-        return prefix + resource + ":wait";
+    private static String encode(String value) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
-
-    String pending(String resource) {
-        return prefix + resource + ":pending";
-    }
-
-    String permit(String resource, String clientId) {
-        return prefix + resource + ":permit:" + clientId;
+    private String base(String resource) { return prefix + "v2:{" + encode(resource) + "}:"; }
+    String bucket(String resource) { return base(resource) + "bucket"; }
+    String wait(String resource) { return base(resource) + "wait"; }
+    String pending(String resource) { return base(resource) + "pending"; }
+    String permit(String resource, String client, String request) {
+        return base(resource) + "permit:" + encode(client) + ":" + encode(request);
     }
 }

@@ -1,71 +1,66 @@
 package io.github.longxiaoyun.fairgrant;
 
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
-/**
- * Local fallback: each JVM uses ratePerSec / writerNodes.
- * Fairness across machines is not guaranteed; used only when Redis is unavailable.
- */
+/** Best-effort per-instance fallback. Cannot enforce a shared quota during partitions. */
 public final class LocalShareFairGrantLimiter implements FairGrantLimiter {
-
     private final FairGrantConfig config;
-    private final ConcurrentHashMap<String, AtomicLong> nextAllowed = new ConcurrentHashMap<String, AtomicLong>();
-
-    public LocalShareFairGrantLimiter(FairGrantConfig config) {
+    private final FairGrantKeys keys;
+    private final LongSupplier clock;
+    private final ConcurrentHashMap<String, State> states = new ConcurrentHashMap<String, State>();
+    private static final class State {
+        boolean granted;
+        long last;
+        final Map<String, Long> receipts = new HashMap<String, Long>();
+    }
+    public LocalShareFairGrantLimiter(FairGrantConfig config) { this(config, System::nanoTime); }
+    LocalShareFairGrantLimiter(FairGrantConfig config, LongSupplier clock) {
         this.config = Objects.requireNonNull(config, "config");
+        this.keys = new FairGrantKeys(config.getKeyPrefix());
+        this.clock = clock;
     }
-
-    @Override
-    public AcquireResult tryAcquire(String project, String table, String clientId) {
-        return tryAcquire(project + ":" + table, clientId);
+    @Override public AcquireResult tryAcquire(String project, String table, String client) {
+        return tryAcquire(keys.resourceKey(project, table), client);
     }
-
-    @Override
-    public AcquireResult tryAcquire(String resourceKey, String clientId) {
-        requireClient(clientId);
-        String key = resourceKey == null ? "" : resourceKey.trim();
-        long interval = config.localShareIntervalMs();
-        AtomicLong slot = nextAllowed.get(key);
-        if (slot == null) {
-            AtomicLong created = new AtomicLong(0L);
-            AtomicLong existing = nextAllowed.putIfAbsent(key, created);
-            slot = existing == null ? created : existing;
-        }
-        long now = System.currentTimeMillis();
-        for (;;) {
-            long next = slot.get();
-            if (now < next) {
-                return AcquireResult.waitFor(next - now, 0D, "local_share_wait");
+    @Override public AcquireResult tryAcquire(String resource, String client) {
+        return tryAcquireRequest(resource, client, UUID.randomUUID().toString());
+    }
+    @Override public AcquireResult tryAcquireRequest(String resource, String client, String request) {
+        String key = keys.normalizeResource(resource);
+        String receipt = keys.permit(key, FairGrantKeys.requireId(client, "clientId"),
+                FairGrantKeys.requireId(request, "requestId"));
+        State state = states.computeIfAbsent(key, ignored -> new State());
+        synchronized (state) {
+            long now = clock.getAsLong();
+            long ttl = TimeUnit.MILLISECONDS.toNanos(config.getPermitTtlMs());
+            Iterator<Long> it = state.receipts.values().iterator();
+            while (it.hasNext()) if (now - it.next() >= ttl) it.remove();
+            if (state.receipts.containsKey(receipt)) return AcquireResult.granted(0, "existing_permit");
+            long interval = TimeUnit.MILLISECONDS.toNanos(config.localShareIntervalMs());
+            long elapsed = now - state.last;
+            if (state.granted && elapsed < interval) {
+                long left = interval - elapsed;
+                return AcquireResult.waitFor(1 + (left - 1) / 1_000_000, 0, "local_share_wait");
             }
-            long newNext = now + interval;
-            if (slot.compareAndSet(next, newNext)) {
-                return AcquireResult.granted(0D, "local_share");
-            }
+            state.granted = true;
+            state.last = now;
+            state.receipts.put(receipt, now);
+            return AcquireResult.granted(0, "local_share");
         }
     }
-
-    @Override
-    public void registerPending(String resourceKey, String clientId) {
-        // no-op locally
-    }
-
-    @Override
-    public void clearPending(String resourceKey, String clientId) {
-        if (resourceKey != null) {
-            nextAllowed.remove(resourceKey.trim());
-        }
-    }
-
-    @Override
-    public void invalidatePermit(String resourceKey, String clientId) {
-        // local share has no persistent permit
-    }
-
-    private static void requireClient(String clientId) {
-        if (clientId == null || clientId.trim().isEmpty()) {
-            throw new IllegalArgumentException("clientId is blank");
-        }
+    @Override public void registerPending(String resource, String client) { validate(resource, client); }
+    @Override public void clearPending(String resource, String client) { validate(resource, client); }
+    @Deprecated
+    @Override public void invalidatePermit(String resource, String client) { validate(resource, client); }
+    private void validate(String resource, String client) {
+        keys.normalizeResource(resource);
+        FairGrantKeys.requireId(client, "clientId");
     }
 }

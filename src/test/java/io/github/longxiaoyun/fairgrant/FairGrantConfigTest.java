@@ -8,6 +8,24 @@ import static org.junit.Assert.assertTrue;
 
 public class FairGrantConfigTest {
 
+    @Test public void fractionalRateGetsUsableBurst() {
+        assertEquals(1D, FairGrantConfig.builder().ratePerSec(.5).build().getBurst(), 0D);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsNaNRate() {
+        FairGrantConfig.builder().ratePerSec(Double.NaN);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsInfiniteRate() {
+        FairGrantConfig.builder().ratePerSec(Double.POSITIVE_INFINITY);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsTinyBurst() {
+        FairGrantConfig.builder().burst(.5);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsNaNBurst() {
+        FairGrantConfig.builder().burst(Double.NaN);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsBadLease() {
+        FairGrantConfig.builder().pendingTtlMs(0);
+    }
     @Test
     public void defaults() {
         FairGrantConfig c = FairGrantConfig.builder().build();
@@ -16,7 +34,7 @@ public class FairGrantConfigTest {
         assertEquals(5D, c.getBurst(), 0.0001);
         assertEquals(20_000L, c.getPermitTtlMs());
         assertEquals(10, c.getWriterNodes());
-        assertEquals(FairGrantConfig.FallbackMode.LOCAL_SHARE, c.getFallbackMode());
+        assertEquals(FairGrantConfig.FallbackMode.DENY, c.getFallbackMode());
         assertEquals(200, c.getRedisTimeoutMs());
     }
 

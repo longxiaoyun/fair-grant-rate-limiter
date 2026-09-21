@@ -1,46 +1,31 @@
 package io.github.longxiaoyun.fairgrant;
 
-/**
- * Distributed fair grant limiter API.
- * <p>
- * Typical ODPS / shared-quota usage:
- * <pre>
- *   AcquireResult r = limiter.tryAcquire("project", "table", machineId);
- *   if (r.isGranted()) {
- *     try {
- *       doCommit();
- *     } finally {
- *       limiter.invalidatePermit(resourceKey, machineId);
- *       // when local queue for this key is empty:
- *       limiter.clearPending(resourceKey, machineId);
- *     }
- *   } else {
- *     requeueLocally(r.getRetryAfterMs());
- *   }
- * </pre>
- */
+/** Shared token grants. Fairness is between live waiting client identities. */
 public interface FairGrantLimiter {
-
-    /**
-     * Try to acquire one permit for {@code resourceKey} on behalf of {@code clientId}.
-     * Non-blocking: returns {@link AcquireResult.Status#WAIT} instead of sleeping.
-     *
-     * @param resourceKey logical rate-limit key (e.g. {@code project:table})
-     * @param clientId    stable client identity (e.g. host IP)
-     */
+    /** Each invocation is a NEW attempt; successful calls consume separate tokens. */
     AcquireResult tryAcquire(String resourceKey, String clientId);
 
-    /**
-     * Convenience: resourceKey = project + ':' + table.
-     */
+    /** Convenience overload for project + ':' + table. */
     AcquireResult tryAcquire(String project, String table, String clientId);
 
-    /** Announce that this client has pending local work for the key. */
+    /**
+     * Retry the SAME logical operation with the same requestId. Distinct operations
+     * MUST use distinct IDs. A grant receipt is retained for permitTtlMs; replaying
+     * it does not consume another token. This does not make business execution
+     * exactly-once. Do not retry an old ID after its receipt retention expires.
+     */
+    AcquireResult tryAcquireRequest(String resourceKey, String clientId, String requestId);
+
+    /** Join/renew the waiting lease without consuming a token. */
     void registerPending(String resourceKey, String clientId);
 
-    /** Remove pending + wait + permit when this client has no more local work. */
+    /** Cancel waiting. Does not refund tokens, erase receipts, or reset local rate state. */
     void clearPending(String resourceKey, String clientId);
 
-    /** Drop current permit after the protected action finishes (success or fail). */
+    /**
+     * @deprecated Grants no longer hold a client's queue position. Receipts expire
+     * automatically and must survive completion for retry safety. This is a no-op.
+     */
+    @Deprecated
     void invalidatePermit(String resourceKey, String clientId);
 }

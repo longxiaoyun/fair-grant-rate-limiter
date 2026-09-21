@@ -57,8 +57,10 @@ public class RedisFairGrantFallbackTest {
 
         AcquireResult wait = limiter.tryAcquire("k", "m1");
         // second call within local interval should wait (still degraded path)
-        assertTrue(wait.getStatus() == AcquireResult.Status.WAIT
-                || wait.getStatus() == AcquireResult.Status.DEGRADED_LOCAL);
+        assertEquals(AcquireResult.Status.WAIT, wait.getStatus());
+        assertFalse(wait.isGranted());
+        limiter.clearPending("k", "m1");
+        assertFalse(limiter.tryAcquire("k", "m1").isGranted());
         limiter.close();
     }
 
