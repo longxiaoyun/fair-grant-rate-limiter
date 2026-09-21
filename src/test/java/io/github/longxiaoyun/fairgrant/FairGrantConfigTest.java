@@ -115,4 +115,18 @@ public class FairGrantConfigTest {
         for(Runnable r:invalid) { try { r.run(); org.junit.Assert.fail("accepted unsafe config"); }
             catch(IllegalArgumentException expected) { } }
     }
+
+    @Test public void stateRetentionIncludesRefillWindowAndReceiptHorizons() {
+        FairGrantConfig c = FairGrantConfig.builder().ratePerSec(.5).burst(2)
+                .stateIdleTtlMs(10).pendingTtlMs(20).permitTtlMs(30).slidingWindow(1000, 2).build();
+        assertEquals(4001, c.getEffectiveStateTtlMs());
+        assertFalse(c.isRedisTestOnBorrow());
+        assertTrue(FairGrantConfig.builder().redisTestOnBorrow(true).build().isRedisTestOnBorrow());
+    }
+    @Test(expected = IllegalArgumentException.class) public void invalidIdleRetentionRejected() {
+        FairGrantConfig.builder().stateIdleTtlMs(0);
+    }
+    @Test(expected = IllegalArgumentException.class) public void unrepresentableRefillHorizonRejected() {
+        FairGrantConfig.builder().ratePerSec(.001).burst(9007199254740991D).build();
+    }
 }

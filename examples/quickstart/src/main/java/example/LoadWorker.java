@@ -80,19 +80,16 @@ public final class LoadWorker {
         boolean ping=Boolean.parseBoolean(args[9]), trace=Boolean.parseBoolean(args[10]);
         FairGrantConfig.Builder builder=FairGrantConfig.builder().keyPrefix("load:")
             .ratePerSec(Double.parseDouble(args[11])).burst(Double.parseDouble(args[12]))
-            .permitTtlMs(2000).pendingTtlMs(5000);
+            .permitTtlMs(2000).pendingTtlMs(5000)
+            .stateIdleTtlMs(Long.parseLong(args[15])).redisTestOnBorrow(ping);
         if(window) builder.slidingWindow(Integer.parseInt(args[13]),Integer.parseInt(args[14]));
         FairGrantConfig config=builder.build();
-        JedisPoolConfig poolConfig=new JedisPoolConfig();
-        poolConfig.setMaxTotal(32);poolConfig.setMaxIdle(8);poolConfig.setMaxWaitMillis(200);
-        poolConfig.setTestOnBorrow(ping);
         Stats[] stats=new Stats[threadCount];
         CountDownLatch ready=new CountDownLatch(threadCount), go=new CountDownLatch(1);
         long[] base=new long[1];
         ExecutorService threads=Executors.newFixedThreadPool(threadCount);
         List<Future<?>> tasks=new ArrayList<Future<?>>();
-        try(JedisPool pool=new JedisPool(poolConfig,"127.0.0.1",port,200);
-            RedisFairGrantLimiter limiter=new RedisFairGrantLimiter(pool,config);
+        try(RedisFairGrantLimiter limiter=FairGrantLimiters.redis("127.0.0.1",port,config);
             PrintWriter traces=new PrintWriter(Files.newBufferedWriter(dir.resolve(node+"-grants.csv"),StandardCharsets.UTF_8))) {
             for(int i=0;i<threadCount;i++) {
                 final int id=i;

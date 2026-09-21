@@ -100,9 +100,9 @@ public class RedisRegressionTest {
         RedisFairGrantLimiter lim = limiter(config().ratePerSec(.001).burst(2));
         // Execute Lua directly, discard its response, then retry through the public API.
         try (Jedis j = pool.getResource()) {
-            j.eval(LuaScriptLoader.load("lua/fair_grant.lua"), 4,
-                    keys.bucket("k"), keys.wait("k"), keys.pending("k"), keys.permit("k", "a", "r"),
-                    "a", ".001", "2", "20000", "5000");
+            j.eval(LuaScriptLoader.load("lua/fair_grant.lua"), 5,
+                    keys.bucket("k"), keys.wait("k"), keys.pending("k"), keys.permit("k", "a", "r"), keys.window("k"),
+                    "a", ".001", "2", "20000", "5000", "0", "0", "2000001");
         }
         assertEquals("existing_permit", lim.tryAcquireRequest("k", "a", "r").getDetail());
         assertTrue(lim.tryAcquireRequest("k", "a", "new").isGranted());
@@ -162,5 +162,95 @@ public class RedisRegressionTest {
         try (Jedis j = pool.getResource()) { j.scriptFlush(); }
         assertTrue(lim.tryAcquireRequest("k", "a", "r").isGranted());
         assertEquals("existing_permit", lim.tryAcquireRequest("k", "a", "r").getDetail());
+    }
+
+    @Test public void highRatePollingIsFastWithoutOvertakingQueueHead() {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1000000).burst(1000));
+        lim.registerPending("k", "first");
+        AcquireResult waiting = lim.tryAcquire("k", "second");
+        assertEquals("not_selected:first", waiting.getDetail());
+        assertEquals(1, waiting.getRetryAfterMs());
+        assertTrue(lim.tryAcquire("k", "first").isGranted());
+        assertTrue(lim.tryAcquire("k", "second").isGranted());
+    }
+    @Test public void lowWindowRateDoesNotBusyPollEvenWithFastTokenRefill() {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1000000).burst(1000).slidingWindow(1000, 5));
+        lim.registerPending("k", "first");
+        assertEquals(50, lim.tryAcquire("k", "second").getRetryAfterMs());
+    }
+    @Test public void idleStateExpiresOnlyAfterAllSafetyHorizons() throws Exception {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1000).burst(1)
+                .slidingWindow(400, 1).permitTtlMs(80).pendingTtlMs(80).stateIdleTtlMs(80));
+        assertTrue(lim.tryAcquire("k", "a").isGranted());
+        try (Jedis j = pool.getResource()) {
+            assertTrue(j.pttl(keys.bucket("k")) > 200);
+            assertTrue(j.pttl(keys.window("k")) > 200);
+        }
+        Thread.sleep(120);
+        assertFalse(lim.tryAcquire("k", "b").isGranted());
+        Thread.sleep(550);
+        try (Jedis j = pool.getResource()) {
+            assertFalse(j.exists(keys.bucket("k")));
+            assertFalse(j.exists(keys.window("k")));
+            assertFalse(j.exists(keys.wait("k")));
+            assertFalse(j.exists(keys.pending("k")));
+        }
+        assertTrue(lim.tryAcquire("k", "new").isGranted());
+    }
+    @Test public void tokenRefillHorizonProtectsIdleQuota() throws Exception {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1).burst(1)
+                .permitTtlMs(20).pendingTtlMs(20).stateIdleTtlMs(20));
+        assertTrue(lim.tryAcquire("k", "a").isGranted());
+        Thread.sleep(80);
+        assertFalse(lim.tryAcquire("k", "a").isGranted());
+        try (Jedis j = pool.getResource()) { assertTrue(j.pttl(keys.bucket("k")) > 800); }
+    }
+    @Test public void shorterClientRetentionCannotEraseLongerReceiptHorizon() throws Exception {
+        RedisFairGrantLimiter first = limiter(config().ratePerSec(1000).burst(10)
+                .permitTtlMs(800).pendingTtlMs(50).stateIdleTtlMs(50));
+        RedisFairGrantLimiter second = limiter(config().ratePerSec(1000).burst(10)
+                .permitTtlMs(50).pendingTtlMs(50).stateIdleTtlMs(50));
+        assertTrue(first.tryAcquireRequest("k", "a", "receipt").isGranted());
+        assertTrue(second.tryAcquire("k", "b").isGranted());
+        Thread.sleep(100);
+        try (Jedis j = pool.getResource()) { assertTrue(j.pttl(keys.bucket("k")) > 500); }
+        assertEquals("existing_permit", first.tryAcquireRequest("k", "a", "receipt").getDetail());
+    }
+    @Test public void registerRenewsWholeStateWithoutClearingWindow() throws Exception {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1000).burst(1)
+                .slidingWindow(350, 1).permitTtlMs(20).pendingTtlMs(200).stateIdleTtlMs(20));
+        assertTrue(lim.tryAcquire("k", "a").isGranted());
+        Thread.sleep(100);
+        lim.registerPending("k", "first");
+        lim.registerPending("k", "second");
+        try (Jedis j = pool.getResource()) {
+            assertTrue(j.pttl(keys.window("k")) > 250);
+            assertEquals(1, j.zcard(keys.window("k")));
+        }
+        assertFalse(lim.tryAcquire("k", "first").isGranted());
+    }
+    @Test public void registrationOnlyResourcesEventuallyDisappear() throws Exception {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1000).burst(1)
+                .permitTtlMs(40).pendingTtlMs(80).stateIdleTtlMs(40));
+        lim.registerPending("k", "gone");
+        Thread.sleep(180);
+        try (Jedis j = pool.getResource()) {
+            assertFalse(j.exists(keys.bucket("k")));
+            assertFalse(j.exists(keys.wait("k")));
+            assertFalse(j.exists(keys.pending("k")));
+        }
+    }
+    @Test public void clockRollbackExtendsRetentionRatherThanResettingQuota() {
+        RedisFairGrantLimiter lim = limiter(config().ratePerSec(1000).burst(1)
+                .permitTtlMs(20).pendingTtlMs(20).stateIdleTtlMs(20));
+        assertTrue(lim.tryAcquire("k", "a").isGranted());
+        try (Jedis j = pool.getResource()) {
+            long future = new java.math.BigDecimal(j.hget(keys.bucket("k"), "tsUs")).longValueExact() + 10_000_000;
+            j.hset(keys.bucket("k"), "tsUs", Long.toString(future));
+            assertFalse(lim.tryAcquire("k", "a").isGranted());
+            assertTrue(j.pttl(keys.bucket("k")) > 9000);
+            lim.registerPending("k", "b");
+            assertTrue(j.pttl(keys.bucket("k")) > 9000);
+        }
     }
 }

@@ -26,12 +26,14 @@ python3 examples/quickstart/load_test.py --mode perf --case hot-30-cooperative
 | `hot-30` | 1 JVM、30 客户端线程竞争 1 桶；忽略 WAIT 的重试提示，测试高频申请 |
 | `hot-30-cooperative` | 同上，按 retryAfter 重试，代表推荐的调用方式 |
 | `resources-100` | 1 JVM、30 线程、100 个资源 |
-| `resources-100-no-ping` | 同上，外部连接池关闭 testOnBorrow，对比每次借连接时 PING 的开销 |
+| `resources-100-no-ping` | 同上，工厂连接池关闭 testOnBorrow，对比每次借连接时 PING 的开销 |
+| `hot-30-default` | 自适应重试，关闭借出校验，使用当前默认连接策略 |
+| `resources-5000-retention` | 5,000 个资源，设置 1 秒最短闲置期；安全租约期限仍为 5 秒，停止 7 秒后验证 key 全部回收 |
 | `resources-5000` | 1 JVM、1 线程轮询 5000 个资源，观察高基数资源的状态保留 |
 
 性能场景的 rate/burst 和窗口上限故意设高，测量实现开销；不是下游真实配额配置。`hot-30` 的大量 WAIT 不应算作有效吞吐，也不是推荐的生产重试方式。
 
-输出区分 calls/s（所有获取）、grants/s（获准）、WAIT、ERROR 和 Redis 不可用时的拒绝。连接池比较只调整借出校验选项；不能据此默认关闭生产连接校验。
+输出区分 calls/s（所有获取）、grants/s（获准）、WAIT、ERROR 和 Redis 不可用时的拒绝。所有案例通过公共工厂创建连接池；连接池比较只调整借出校验选项；当前库默认关闭借出校验并启用空闲校验；脚本保留开启借出校验的对照案例。
 
 ## 持续运行与故障
 
@@ -41,7 +43,7 @@ python3 examples/quickstart/load_test.py --mode soak --soak-seconds 180
 python3 examples/quickstart/load_test.py --mode soak --soak-seconds 90 --no-ping
 ```
 
-30 个独立 JVM 持续共享一个 rate=5、burst=1、75/15s 的桶，按重试提示等待。中途按持续时间比例依次：
+`--no-ping` 使用当前默认连接策略，不加则保留旧借出校验策略作对照。30 个独立 JVM 持续共享一个 rate=5、burst=1、75/15s 的桶，按重试提示等待。中途按持续时间比例依次：
 
 1. 终止一个 JVM，不主动清理它的等待资格。
 2. 断开 Redis 的客户端连接。
@@ -59,7 +61,7 @@ python3 examples/quickstart/load_test.py --mode soak --soak-seconds 90 --no-ping
 - 每线程最多保留 20,000 个均匀抽样的延迟。P50/P95/P99 根据调用数加权计算，属于样本估计；平均值和最大值来自完整计数。
 - Redis INFO 提供内存、RSS、CPU、连接和命令计数。总命令数包含 Lua 内部命令；EVAL/EVALSHA 和 PING 单独计数，更接近客户端协议请求量。
 - JVM 指标是堆用量、进程 CPU 和 GC，不是完整 RSS；包含压测程序自身开销。累计 CPU 和 GC 包含预热、测量与清理；Redis 采样速率只用测量时段内的样本计算。
-- 结束后等待 5 秒，观察 2 秒 TTL 回执过期后的 Redis 内存和 key 数。桶和窗口历史不会因资源闲置自动删除，剩余状态不等于泄漏；高基数资源需要生命周期管理。
+- 结束后等待 5 秒，观察 2 秒 TTL 回执过期后的 Redis 内存和 key 数。普通案例的闲置保留期为 60 秒，因此此时仍保留桶和窗口历史；专门的 retention 案例等待 7 秒并断言所有状态已回收。有效保留期不会短于令牌补满、窗口、回执和租约的安全期限。
 - 被终止进程的聚合计数来自最后一次快照，最多缺少约 1 秒数据；该进程的延迟样本不计入故障场景的分位数。发放日志单独刷新保留。
 - 本机回环测试会受共享机器负载影响；短时测试和数分钟持续运行不能证明数天稳定、集群故障转移安全或生产容量。
 

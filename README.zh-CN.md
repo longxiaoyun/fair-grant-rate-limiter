@@ -66,7 +66,7 @@ if (!result.isGranted()) {
 - [可运行的独立项目](examples/quickstart/README.md)：完整处理等待、重试和多表任务。
 - [Kafka → ODPS 实际接入案例](docs/kafka-odps.zh-CN.md)：30 个节点按表攒批与提交。
 - [配置与行为边界](docs/reference.zh-CN.md)：公平队列、窗口、回执和 Redis 故障。
-- [旧版升级](docs/reference.zh-CN.md#从旧-snapshot-升级)：v3 与旧协议不能混跑。
+- [旧版升级](docs/reference.zh-CN.md#从旧-snapshot-升级)：v4 与旧协议不能混跑。
 
 严格窗口限制的是令牌发放时间。实际接口调用应紧接获准执行，SDK 内部重试需由接入方控制。默认 Redis 故障时暂停发放。
 

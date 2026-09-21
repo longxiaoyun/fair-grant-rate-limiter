@@ -108,7 +108,7 @@ def trial(name, config, cp, java, out, seconds, warmup=3, faults=False):
                 str(port), str(folder), 'node-%02d' % n, str(config['threads']), str(config['resources']),
                 str(warmup), str(seconds), str(config['window']).lower(), str(config['respect']).lower(),
                 str(config['ping']).lower(), str(faults).lower(), str(config['rate']), str(config['burst']),
-                str(config['window_ms']), str(config['cap'])]
+                str(config['window_ms']), str(config['cap']), str(config['state_idle_ms'])]
             workers.append(subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT))
         deadline = time.monotonic() + 30
         while len(list(folder.glob('*.ready'))) != config['jvms']:
@@ -189,9 +189,11 @@ def trial(name, config, cp, java, out, seconds, warmup=3, faults=False):
             if values:
                 weighted.extend((v, s['calls']/len(values)) for v in values)
         last = info(port)
-        time.sleep(5)  # Receipt TTL is 2s; let expired receipts drain before measuring retained state.
+        time.sleep(7 if config['state_idle_ms'] < 5000 else 5)  # Short-retention case also waits for 5s leases.
         cool = info(port)
         keys = redis_command(port, 'DBSIZE')
+        if config['state_idle_ms'] < 5000:
+            assert keys == 0, 'Idle resource state did not expire'
         measured = [s for s in samples if 0 <= s['elapsed'] <= seconds and s.get('redis')]
         latency_mean = sum(s['latency_sum_ns'] for s in thread_stats)/max(1,totals['calls'])/1e6
         report = dict(name=name, config=config, seconds=seconds, warmup_seconds=warmup, totals=totals,
@@ -294,13 +296,15 @@ def main():
     java=str(Path(os.environ['JAVA_HOME'])/'bin/java') if os.environ.get('JAVA_HOME') else shutil.which('java')
     out=HERE/'target'/('load-'+str(time.time_ns()));out.mkdir(parents=True)
     base=dict(jvms=1,threads=1,resources=1,window=False,respect=False,ping=True,
-              rate=1000000,burst=1000000,window_ms=1000,cap=1000000)
+              rate=1000000,burst=1000000,window_ms=1000,cap=1000000,state_idle_ms=60000)
     cases=[('single',{}),('single-window',dict(window=True)),
            ('hot-30',dict(threads=30,window=True)),
            ('hot-30-cooperative',dict(threads=30,window=True,respect=True)),
            ('resources-100',dict(threads=30,resources=100,window=True)),
            ('resources-100-no-ping',dict(threads=30,resources=100,window=True,ping=False)),
-           ('resources-5000',dict(resources=5000,window=True))]
+           ('resources-5000',dict(resources=5000,window=True)),
+           ('resources-5000-retention',dict(resources=5000,window=True,state_idle_ms=1000,ping=False)),
+           ('hot-30-default',dict(threads=30,window=True,respect=True,ping=False))]
     if args.case:
         cases=[case for case in cases if case[0]==args.case]
         if not cases:parser.error('Unknown performance case')

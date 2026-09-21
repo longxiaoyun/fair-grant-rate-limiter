@@ -181,7 +181,7 @@ if (result.getStatus() == AcquireResult.Status.ERROR) {
 
 - [按真实 Kafka → ODPS 场景重新评审的结果](scenario-review.zh-CN.md)
 - [配置、获取重试、等待租约与实现说明](reference.zh-CN.md)
-- [旧版本迁移](reference.zh-CN.md#从旧-snapshot-升级)：旧实现、v2 与当前 v3 协议不能混跑。
+- [旧版本迁移](reference.zh-CN.md#从旧-snapshot-升级)：旧实现、v2/v3 与当前 v4 协议不能混跑。
 
 ## 开发与测试
 

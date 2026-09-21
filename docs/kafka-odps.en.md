@@ -181,7 +181,7 @@ The repository provides **shared per-resource token buckets and fair token distr
 
 - [Review against the actual Kafka → ODPS scenario (Chinese)](scenario-review.zh-CN.md)
 - [Configuration, acquisition retries, waiting leases and internals](reference.md)
-- [Migration](reference.md#migrating-from-the-old-snapshot): old implementations, v2 and the current v3 protocol must not run together.
+- [Migration](reference.md#migrating-from-the-old-snapshot): old implementations, v2/v3 and the current v4 protocol must not run together.
 
 ## Development and tests
 
