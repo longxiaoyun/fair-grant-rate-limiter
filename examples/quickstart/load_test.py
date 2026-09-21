@@ -180,6 +180,9 @@ def trial(name, config, cp, java, out, seconds, warmup=3, faults=False):
             completed.append(json.loads(path.read_text()))
         thread_stats = [s for process in completed for s in process['threads']]
         totals = {k: sum(s[k] for s in thread_stats) for k in ['calls', 'grants', 'waits', 'errors', 'degraded', 'down']}
+        (folder/'samples.json').write_text(json.dumps(samples,indent=2))
+        (folder/'fault-events.json').write_text(json.dumps(events,indent=2))
+        (folder/'totals.json').write_text(json.dumps(totals,indent=2))
         assert totals['errors'] == 0 and totals['degraded'] == 0, totals
         if not faults:
             assert totals['down'] == 0, totals

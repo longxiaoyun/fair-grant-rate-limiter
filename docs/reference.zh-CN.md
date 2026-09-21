@@ -91,7 +91,7 @@ AcquireResult result = limiter.tryAcquireRequest(resourceKey, clientId, requestI
 - **公平**：仍在租约期内的等待客户端按 FIFO 排队。获得一次许可后退出队列，有新请求再排到队尾。公平按 `clientId`，不是按线程或业务请求。
 - **存活**：等待客户端通过重试或 `registerPending` 续租。崩溃后，下一次获取/登记会清除过期的等待成员，不依赖进程主动退出。
 - **幂等**：显式 `requestId` 只在 `permitTtlMs` 回执保留期内避免重复扣费；它不能保证业务调用只执行一次。
-- **失败**：默认 `DENY`，Redis 不可用时返回 `WAIT`。选择 `LOCAL_SHARE` 或 `ALLOW` 后，就接受失去严格共享配额保证。
+- **失败**：默认 `DENY`，Redis 不可用（含恢复数据时的 `LOADING`）时返回 `WAIT`。选择 `LOCAL_SHARE` 或 `ALLOW` 后，就接受失去严格共享配额保证。
 
 发放许可与真正发出业务请求是两件事：拿到许可后应及时执行，不能先囤许可再集中提交。业务超时后如果要再发一次云 API 请求，应申请新许可、使用新 `requestId`；业务幂等键可以保持不变。
 

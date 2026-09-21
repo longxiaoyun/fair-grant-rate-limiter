@@ -76,6 +76,11 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
         try {
             return evalGrant(resource, client, request);
         } catch (JedisDataException e) {
+            // Redis accepts connections while replaying AOF/RDB but rejects commands.
+            // LOADING is temporary unavailability, not a malformed script or state.
+            if (e.getMessage() != null && e.getMessage().startsWith("LOADING ")) {
+                return fallbackAcquire(resource, client, request, e);
+            }
             return AcquireResult.error("redis_data_error:" + e.getMessage());
         } catch (JedisException e) {
             LOG.warn("fair-grant Redis acquire failed, fallback={}, resource={}, client={}: {}",

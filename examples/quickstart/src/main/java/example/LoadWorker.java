@@ -108,7 +108,10 @@ public final class LoadWorker {
                             long after=System.nanoTime();
                             if(before>=start) {
                                 if(s.measuredStart==0)s.measuredStart=before;
-                                s.measuredEnd=after;s.record(r,after-before);
+                                s.measuredEnd=after;
+                                if(r.getStatus()==AcquireResult.Status.ERROR && s.errors<5)
+                                    System.err.println("ACQUIRE_ERROR " + Instant.now() + " " + client + " " + r);
+                                s.record(r,after-before);
                                 if(trace && r.isGranted()) {
                                     synchronized(traces){traces.println(wallBefore+","+epochUs()+","+client);traces.flush();}
                                 }
