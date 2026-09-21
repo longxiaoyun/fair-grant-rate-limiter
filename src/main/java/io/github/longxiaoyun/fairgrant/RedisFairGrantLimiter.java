@@ -51,7 +51,7 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
         this.config = Objects.requireNonNull(config, "config");
         this.keys = new FairGrantKeys(config.getKeyPrefix());
         this.ownPool = ownPool;
-        this.localFallback = new LocalShareFairGrantLimiter(config);
+        this.localFallback = config.hasSlidingWindow() ? null : new LocalShareFairGrantLimiter(config);
         this.grantScript = LuaScriptLoader.load(SCRIPT_GRANT);
         this.registerScript = LuaScriptLoader.load(SCRIPT_REGISTER);
         this.clearScript = LuaScriptLoader.load(SCRIPT_CLEAR);
@@ -77,10 +77,13 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
             return evalGrant(resource, client, request);
         } catch (JedisDataException e) {
             return AcquireResult.error("redis_data_error:" + e.getMessage());
-        } catch (RuntimeException e) {
+        } catch (JedisException e) {
             LOG.warn("fair-grant Redis acquire failed, fallback={}, resource={}, client={}: {}",
                     config.getFallbackMode(), resource, client, e.toString());
             return fallbackAcquire(resource, client, request, e);
+        } catch (RuntimeException e) {
+            LOG.error("fair-grant unexpected acquire failure", e);
+            return AcquireResult.error("unexpected_acquire_error:" + e.getClass().getSimpleName());
         }
     }
 
@@ -108,7 +111,7 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
             LOG.warn("fair-grant clearPending failed, resource={}, client={}: {}",
                     resource, client, e.toString());
         } finally {
-            localFallback.clearPending(resource, client);
+            if (localFallback != null) localFallback.clearPending(resource, client);
         }
     }
 
@@ -127,19 +130,22 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
 
     private AcquireResult evalGrant(String resource, String client, String request) {
         try (Jedis jedis = jedisPool.getResource()) {
-            Object raw = evalshaOrEval(jedis, ScriptKind.GRANT, grantScript, 4,
+            Object raw = evalshaOrEval(jedis, ScriptKind.GRANT, grantScript, 5,
                     new String[]{
                             keys.bucket(resource),
                             keys.wait(resource),
                             keys.pending(resource),
-                            keys.permit(resource, client, request)
+                            keys.permit(resource, client, request),
+                            keys.window(resource)
                     },
                     new String[]{
                             client,
                             Double.toString(config.getRatePerSec()),
                             Double.toString(config.getBurst()),
                             Long.toString(config.getPermitTtlMs()),
-                            Long.toString(config.getPendingTtlMs())
+                            Long.toString(config.getPendingTtlMs()),
+                            Long.toString(config.getWindowMs()),
+                            Integer.toString(config.getWindowMaxPermits())
                     });
             return parseGrantResult(raw);
         }

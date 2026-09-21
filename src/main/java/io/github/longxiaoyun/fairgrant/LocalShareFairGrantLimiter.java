@@ -23,6 +23,9 @@ public final class LocalShareFairGrantLimiter implements FairGrantLimiter {
     public LocalShareFairGrantLimiter(FairGrantConfig config) { this(config, System::nanoTime); }
     LocalShareFairGrantLimiter(FairGrantConfig config, LongSupplier clock) {
         this.config = Objects.requireNonNull(config, "config");
+        if (config.hasSlidingWindow()) {
+            throw new IllegalArgumentException("LocalShare cannot enforce a distributed sliding window");
+        }
         this.keys = new FairGrantKeys(config.getKeyPrefix());
         this.clock = clock;
     }

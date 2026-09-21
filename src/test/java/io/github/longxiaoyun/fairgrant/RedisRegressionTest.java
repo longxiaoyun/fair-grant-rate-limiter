@@ -134,11 +134,11 @@ public class RedisRegressionTest {
         RedisFairGrantLimiter lim = limiter(config().ratePerSec(1).burst(1));
         assertTrue(lim.tryAcquire("k", "a").isGranted());
         try (Jedis j = pool.getResource()) {
-            long future = Long.parseLong(j.hget(keys.bucket("k"), "ts")) + 60000;
-            j.hset(keys.bucket("k"), "ts", Long.toString(future));
+            long future = new java.math.BigDecimal(j.hget(keys.bucket("k"), "tsUs")).longValueExact() + 60_000_000L;
+            j.hset(keys.bucket("k"), "tsUs", Long.toString(future));
             for (int i = 0; i < 5; i++) {
                 assertFalse(lim.tryAcquire("k", "a").isGranted());
-                assertEquals(Long.toString(future), j.hget(keys.bucket("k"), "ts"));
+                assertEquals(future, new java.math.BigDecimal(j.hget(keys.bucket("k"), "tsUs")).longValueExact());
             }
         }
     }

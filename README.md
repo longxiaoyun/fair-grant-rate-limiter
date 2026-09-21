@@ -9,6 +9,8 @@ English | [中文](README.zh-CN.md)
 
 When multiple processes share a resource's call quota, it handles two concerns: **maintain the shared token bucket and distribute tokens in waiting order among clients with ready work.**
 
+An optional strict rolling window can cap new grants, for example at 75 in any 15 seconds.
+
 The application defines the resource, the work and the operation performed after a grant. The library has no Kafka or ODPS SDK dependency and does not encode a cloud product's quota rules.
 
 The Kafka → ODPS pipeline that motivated the project explains why a shared bucket alone is not enough and what fair distribution adds.
@@ -111,9 +113,11 @@ The same mechanism can coordinate services sharing one third-party API account, 
 
 `75 / 15 = 5` gives a refill rate, but **five tokens per second on average is not automatically a guarantee of at most 75 commits in every 15-second window**. Burst capacity and actual commit timing also matter.
 
-The current library implements a token bucket, without a separate 15-second window counter. With the default `rate=5, burst=5`, the scenario review reproduced 76 grants in less than fifteen seconds on real Redis. The defaults must not be presented as proof that the ODPS window limit is enforced.
+Add `.slidingWindow(15_000L, 75)` to enforce a strict rolling window. One Redis Lua operation checks token availability, new grants in the last 15 seconds, and the FIFO queue head. A new grant requires all three checks to pass. Even with `rate=5, burst=5`, every interval `(t−15s, t]` contains at most 75 new grants.
 
-The example below uses `rate=5, burst=1` for smooth grants, normally at least about 200ms apart. Begin the actual Commit promptly after acquiring; do not collect tokens and submit later in a burst. Production integration must also account for SDK retries, other writers and server-side counting boundaries, reducing the rate for headroom as necessary. **A strict server-side window guarantee remains an integration validation requirement.**
+The example combines `burst=1` for smoothing with the strict window. Duration and count are application settings; no ODPS-specific rule is built in. Without this option, the library remains a fair token bucket.
+
+The window covers **new grant timestamps in Redis**. Execute promptly and acquire new quota for each business retry; SDK-internal retries must also be accounted for. `FairGrantExecutor` acquires fresh quota and immediately invokes one operation, but network timing and SDK behavior still require application integration testing.
 
 The cited quota concerns per-table write Commit calls. Other Catalog API metadata methods have their own limits; do not apply this number to every Catalog method. [Catalog API limits](https://help.aliyun.com/en/maxcompute/catalogapi-sdk-user-guide)
 
@@ -139,6 +143,7 @@ FairGrantConfig config = FairGrantConfig.builder()
     .keyPrefix("odps:commit:")
     .ratePerSec(5.0) // Token refill rate per table across ALL nodes
     .burst(1.0)     // Smooth grants instead of accumulating commit tokens
+    .slidingWindow(15_000L, 75) // At most 75 new grants in any 15 seconds
     .fallbackMode(FairGrantConfig.FallbackMode.DENY)
     .build();
 
@@ -164,13 +169,13 @@ Assume the application has selected and fixed a `readyBatch`, with all preparati
 
 ```java
 String resourceKey = "demo:tableA"; // Derive from readyBatch's destination table identity
-AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
+FairGrantExecutor executor = new FairGrantExecutor(limiter);
+AcquireResult result = executor.tryExecute(resourceKey, clientId,
+    () -> commitPreparedBatchOnce(readyBatch));
 
-if (result.isGranted()) {
-    commitPreparedBatchOnce(readyBatch); // Perform this one actual Commit promptly
-} else if (result.getStatus() == AcquireResult.Status.ERROR) {
+if (result.getStatus() == AcquireResult.Status.ERROR) {
     retainBatchAndAlert(readyBatch, result.getDetail());
-} else {
+} else if (!result.isGranted()) {
     scheduleSameBatch(readyBatch, result.getRetryAfterMs()); // Keep locally; acquire again later
 }
 ```
@@ -189,7 +194,7 @@ The repository provides **shared per-resource token buckets and fair token distr
 
 - [Review against the actual Kafka → ODPS scenario (Chinese)](docs/scenario-review.zh-CN.md)
 - [Configuration, acquisition retries, waiting leases and internals](docs/reference.md)
-- [Migration](docs/reference.md#migrating-from-the-old-snapshot): the old main-branch implementation and the PR's v2 implementation must not run together.
+- [Migration](docs/reference.md#migrating-from-the-old-snapshot): old implementations, v2 and the current v3 protocol must not run together.
 
 ## Development and tests
 

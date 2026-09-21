@@ -16,7 +16,7 @@ public interface FairGrantLimiter {
      */
     AcquireResult tryAcquireRequest(String resourceKey, String clientId, String requestId);
 
-    /** Join/renew the waiting lease without consuming a token. */
+    /** Join/renew only for work ready to execute immediately; does not consume a token. */
     void registerPending(String resourceKey, String clientId);
 
     /** Cancel waiting. Does not refund tokens, erase receipts, or reset local rate state. */

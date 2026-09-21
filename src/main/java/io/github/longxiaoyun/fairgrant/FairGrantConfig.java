@@ -24,6 +24,8 @@ public final class FairGrantConfig {
     private final long pendingTtlMs;
     private final FallbackMode fallbackMode;
     private final int redisTimeoutMs;
+    private final long windowMs;
+    private final int windowMaxPermits;
 
     private FairGrantConfig(Builder b) {
         this.keyPrefix = b.keyPrefix;
@@ -34,6 +36,8 @@ public final class FairGrantConfig {
         this.pendingTtlMs = b.pendingTtlMs;
         this.fallbackMode = b.fallbackMode;
         this.redisTimeoutMs = b.redisTimeoutMs;
+        this.windowMs = b.windowMs;
+        this.windowMaxPermits = b.windowMaxPermits;
     }
 
     public static Builder builder() {
@@ -71,11 +75,19 @@ public final class FairGrantConfig {
         return redisTimeoutMs;
     }
 
+    /** Optional rolling window duration; zero means disabled. */
+    public long getWindowMs() { return windowMs; }
+
+    /** Maximum NEW grants in (now - windowMs, now]. */
+    public int getWindowMaxPermits() { return windowMaxPermits; }
+
+    public boolean hasSlidingWindow() { return windowMaxPermits > 0; }
+
     /** Local-share interval when Redis is down: rate/N. */
     public long localShareIntervalMs() {
         double perNode = ratePerSec / Math.max(1, writerNodes);
         if (perNode <= 0D) {
-            return 1000L;
+            return Long.MAX_VALUE;
         }
         return Math.max(1L, (long) Math.ceil(1000D / perNode));
     }
@@ -89,6 +101,21 @@ public final class FairGrantConfig {
         private long pendingTtlMs = 5_000L;
         private FallbackMode fallbackMode = FallbackMode.DENY;
         private int redisTimeoutMs = 200;
+        private long windowMs;
+        private int windowMaxPermits;
+
+        /**
+         * Add a strict rolling-window gate alongside the token bucket. Requires DENY
+         * fallback: a local instance cannot enforce a distributed window during outages.
+         */
+        public Builder slidingWindow(long windowMs, int maxPermits) {
+            if (windowMs <= 0 || maxPermits <= 0) {
+                throw new IllegalArgumentException("windowMs and maxPermits must be > 0");
+            }
+            this.windowMs = windowMs;
+            this.windowMaxPermits = maxPermits;
+            return this;
+        }
 
         public Builder keyPrefix(String keyPrefix) {
             this.keyPrefix = Objects.requireNonNull(keyPrefix, "keyPrefix");
@@ -148,9 +175,16 @@ public final class FairGrantConfig {
 
         public FairGrantConfig build() {
             FairGrantConfig config = new FairGrantConfig(this);
+            if (config.getBurst() > 9_007_199_254_740_991D) {
+                throw new IllegalArgumentException("burst exceeds exact token-count precision");
+            }
+            if (config.hasSlidingWindow() && fallbackMode != FallbackMode.DENY) {
+                throw new IllegalArgumentException("slidingWindow requires DENY fallback");
+            }
             if (config.localShareIntervalMs() > Long.MAX_VALUE / 1_000_000L
                     || permitTtlMs > Long.MAX_VALUE / 1_000_000L
-                    || pendingTtlMs > Long.MAX_VALUE / 1_000_000L) {
+                    || pendingTtlMs > Long.MAX_VALUE / 1_000_000L
+                    || windowMs > Long.MAX_VALUE / 1_000_000L) {
                 throw new IllegalArgumentException("interval/TTL is too large");
             }
             return config;

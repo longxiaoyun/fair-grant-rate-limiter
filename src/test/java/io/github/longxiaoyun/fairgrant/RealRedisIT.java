@@ -107,10 +107,13 @@ public class RealRedisIT extends RedisRegressionTest {
                 // Check EVERY interval between grant timestamps, not just total runtime.
                 for (int begin = 0; begin < grantTimes.size(); begin++) {
                     for (int end = begin; end < grantTimes.size(); end++) {
-                        double allowed = 2 + 20 * (grantTimes.get(end) - grantTimes.get(begin)) / 1000D;
+                        double allowed = 2 + 20 * (grantTimes.get(end) - grantTimes.get(begin)) / 1_000_000D;
                         assertTrue("window " + begin + ".." + end + " budget=" + allowed,
                                 end - begin + 1 <= allowed + .001);
                     }
+                }
+                for (int end = 6; end < grantTimes.size(); end++) {
+                    assertTrue("strict rolling window", grantTimes.get(end) - grantTimes.get(end - 6) >= 500_000L);
                 }
                 for (long first : firstGrants.values()) assertTrue(first <= grantTimes.get(3));
                 assertEquals(0, j.zcard(k.wait("table")));
