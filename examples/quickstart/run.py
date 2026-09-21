@@ -16,7 +16,7 @@ import urllib.parse
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 SCENARIOS = {
-    'quick': dict(nodes=3, batches=4, rate=.6, burst=6, window=10000, cap=6, resources=['tableA']),
+    'quick': dict(nodes=3, batches=4, rate=.5, burst=1, window=10000, cap=6, resources=['tableA']),
     'idle': dict(nodes=3, idle_nodes=1, batches=3, rate=.6, burst=6, window=10000, cap=6, resources=['tableA']),
     'fleet': dict(nodes=30, batches=3, rate=4.8, burst=1, window=15000, cap=75, resources=['tableA', 'tableB']),
     'window': dict(nodes=3, batches=26, rate=5, burst=5, window=15000, cap=75, resources=['tableA']),
@@ -150,7 +150,7 @@ def run_scenario(name, cp, java):
                 uncertain_boundary_groups=uncertain,
                 max_acquisition_latency_ms=max(g['after']-g['before'] for g in gs)/1000)
         http_within_limit = all(v['max_http_calls_in_window'] <= cfg['cap'] for v in results.values())
-        if name in ('fleet', 'retry-paced'):
+        if name in ('quick', 'fleet', 'retry-paced'):
             assert http_within_limit, 'Paced HTTP scenario exceeded observed downstream limit'
         report = dict(observed_http_window_pass=http_within_limit, scenario=name, config=cfg, elapsed_seconds=round(time.monotonic()-started, 3),
                       http_attempts=len(events), successes=len(successes), resources=results,

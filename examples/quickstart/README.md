@@ -10,7 +10,7 @@
 python3 examples/quickstart/run.py
 ```
 
-脚本自动构建、启动独立 Redis 和 HTTP 测试服务，再启动 3 个 JVM。每个 JVM 有 4 个待执行任务；拿到令牌才调用 HTTP 接口，等待时保留当前任务。前 6 个令牌发满后，需要等窗口腾出名额才能继续，总耗时约 10 秒（不含首次构建）。
+脚本自动构建、启动独立 Redis 和 HTTP 测试服务，再启动 3 个 JVM。每个 JVM 有 4 个待执行任务；拿到令牌才调用 HTTP 接口，等待时保留当前任务。默认使用每秒 0.5 个令牌、burst=1 平滑发放，并叠加 6／10s 窗口，给实际请求到达留出余量。12 次操作约 22 秒完成（不含首次构建）。
 
 - [DemoWorker.java](src/main/java/example/DemoWorker.java)：真实消费者代码，只使用库的公共 API。
 - [pom.xml](pom.xml)：独立项目的依赖。
