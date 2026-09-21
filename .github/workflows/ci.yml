@@ -38,6 +38,9 @@ jobs:
           echo "$PWD/src" >> "$GITHUB_PATH"
       - name: Unit, Redis integration and multi-JVM HTTP tests
         run: mvn -B -Pjdk${{ matrix.java }},real-redis clean verify
+      - name: Standalone consumer scenarios (public API)
+        if: matrix.java == '8' && matrix.redis == '7.2.7'
+        run: python3 examples/quickstart/run.py --scenario all
       - name: Preserve verification logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,3 +50,6 @@ jobs:
             target/surefire-reports/
             target/redis-it-*/redis.log
             target/worker-*.log
+            examples/quickstart/target/run-*/
+            examples/quickstart/target/latest-report.json
+            examples/quickstart/target/build.log

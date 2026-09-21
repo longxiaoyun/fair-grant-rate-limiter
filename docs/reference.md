@@ -2,7 +2,7 @@
 
 [Back to the project introduction](../README.md) · [中文](reference.zh-CN.md)
 
-Start with the README for the business example and integration steps. Use this page to look up configuration, handle retries and failures, or migrate an older version. The README explains mixed-table Kafka consumption and local batching; the [scenario review (Chinese)](scenario-review.zh-CN.md) records the window counterexample and its implemented fix.
+Start with the README to run the standalone example. Use this page to look up configuration, handle retries and failures, or migrate an older version. The [integration guide](kafka-odps.en.md) explains mixed-table Kafka consumption and local batching; the [scenario review (Chinese)](scenario-review.zh-CN.md) records the window counterexample and its implemented fix.
 
 ## Configuration
 
