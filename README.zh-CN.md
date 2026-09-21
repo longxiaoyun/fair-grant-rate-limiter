@@ -5,15 +5,21 @@
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**基于 Redis + Lua 的 Java 公平令牌桶分发库。**
+**基于 Redis 的 Java 分布式公平令牌桶库。**
 
-当多个进程共享同一资源的调用额度时，它同时负责两件事：**维护这份全局令牌桶，并把令牌按等待顺序分给有待执行任务的节点。**
+Fair Grant Rate Limiter 用于多个 Java 进程共享资源调用配额的场景。它通过 Redis 和 Lua 原子维护令牌桶、滑动窗口和等待队列，在控制全局令牌发放速率的同时，按 FIFO 顺序向等待中的客户端分发令牌。
 
-还可以叠加严格滑动窗口，例如任意 15 秒最多发放 75 个令牌。
+适用于分布式批量写入、第三方 API 调用等需要同时满足**全局限流**与**客户端公平性**的场景。应用通过 `resourceKey` 定义配额的共享范围，通过 `clientId` 标识参与分发的客户端。
 
-资源是什么、任务是什么、获得令牌后执行什么操作，由接入方定义。库不依赖 Kafka 或 ODPS SDK，也不内置任何云产品的配额规则。
+## 核心特性
 
-下面用催生这个库的 Kafka → ODPS 写入链路说明：为什么只有一个共享令牌桶还不够，公平分发解决了什么问题。
+- **全局共享配额**：同一资源的所有客户端共享令牌桶，统一配置补充速率和突发容量；不同资源独立计数。
+- **FIFO 公平分发**：有效等待租约内的客户端按入队顺序获取令牌，获准后退出本轮排队；有新任务时重新加入队尾。
+- **可选严格滑动窗口**：在令牌桶之外限制任意指定时长内的新令牌数量，例如每 15 秒最多发放 75 个令牌。
+- **获取重试去重**：通过请求 ID 在回执有效期内重试同一次令牌获取，避免重复消耗配额。
+- **非阻塞接入**：获取接口返回获准状态或建议重试间隔，由应用安排后续执行和重试。
+
+支持 Java 8+、Redis 5+。以 Java 库形式引入应用，无需部署独立的令牌分发服务。
 
 ## 为什么需要这个库？
 
@@ -48,7 +54,7 @@
 
 ### 同一张表有提交次数限制
 
-阿里云 MaxCompute 官方文档列出的限制是：**单表写入 Commit 每 15 秒 75 次**。本案例通过 Tunnel `UploadSession.commit` 提交。30 个节点向 tableA 发起的提交要合并计算，不能每个节点都各用 75 次。[官方数据传输服务限制](https://help.aliyun.com/zh/maxcompute/overview-of-dts)
+MaxCompute 官方文档列出的限制是：**单表写入 Commit 每 15 秒 75 次**。本案例通过 Tunnel `UploadSession.commit` 提交。30 个节点向 tableA 发起的提交要合并计算，不能每个节点都各用 75 次。[官方数据传输服务限制](https://help.aliyun.com/zh/maxcompute/overview-of-dts)
 
 这里的 **75 次是 Commit 调用次数，不是 75 条 Kafka 消息，也不是 75 行数据**。例如一个批次包含 6000 行、只执行一次 Commit，就申请一个提交令牌。tableB 则使用自己的提交额度。
 

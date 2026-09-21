@@ -152,4 +152,4 @@ The `jdk8` / `jdk11` / `jdk17` compatibility profiles remain available. Higher-v
 
 Keep source compatible with Java 8. Add regression tests for grant behavior and run `mvn -Preal-redis clean verify` before proposing changes.
 
-[Apache License 2.0](../LICENSE). A personal project, not an Alibaba product.
+[Apache License 2.0](../LICENSE).

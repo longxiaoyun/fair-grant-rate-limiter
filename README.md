@@ -5,15 +5,21 @@ English | [中文](README.zh-CN.md)
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**A Java library for fair token-bucket distribution, built on Redis and Lua.**
+**A Redis-backed Java library for distributed fair token-bucket allocation.**
 
-When multiple processes share a resource's call quota, it handles two concerns: **maintain the shared token bucket and distribute tokens in waiting order among clients with ready work.**
+Fair Grant Rate Limiter coordinates shared resource quotas across Java processes. Redis and Lua atomically maintain a token bucket, an optional rolling window, and a waiting queue to enforce a global grant rate and allocate tokens to waiting clients in FIFO order.
 
-An optional strict rolling window can cap new grants, for example at 75 in any 15 seconds.
+It is designed for distributed batch writes, third-party API calls, and other workloads that require both **global rate limiting** and **fairness between clients**. Applications use `resourceKey` to define the scope of a shared quota and `clientId` to identify each participating client.
 
-The application defines the resource, the work and the operation performed after a grant. The library has no Kafka or ODPS SDK dependency and does not encode a cloud product's quota rules.
+## Features
 
-The Kafka → ODPS pipeline that motivated the project explains why a shared bucket alone is not enough and what fair distribution adds.
+- **Shared resource quotas**: all clients of a resource share one token bucket with a configured refill rate and burst capacity. Different resources have independent quotas.
+- **FIFO allocation**: clients with valid waiting leases receive tokens in queue order. A grant removes the client from its current turn; new work joins the tail.
+- **Optional strict rolling window**: cap new grants within any configured duration, such as at most 75 grants in 15 seconds, alongside the token bucket.
+- **Acquisition retry deduplication**: retry an acquisition using its request ID within the receipt retention period without consuming quota again.
+- **Non-blocking integration**: acquisition returns a grant result or a suggested retry delay; the application schedules execution and retries.
+
+Requires Java 8+ and Redis 5+. Integrates as a Java library without a separate token distribution service.
 
 ## Why this library exists
 
@@ -48,7 +54,7 @@ Several nodes may receive rows for tableA, so several independent local batches 
 
 ### The table has a shared commit limit
 
-Alibaba Cloud's MaxCompute documentation lists **75 write Commit calls per table per 15 seconds**. This example commits through Tunnel `UploadSession.commit`. Commits to tableA from all thirty nodes count together; each node does not receive a separate allowance of 75. [Official Data Transmission Service limits](https://help.aliyun.com/zh/maxcompute/overview-of-dts)
+The MaxCompute documentation lists **75 write Commit calls per table per 15 seconds**. This example commits through Tunnel `UploadSession.commit`. Commits to tableA from all thirty nodes count together; each node does not receive a separate allowance of 75. [Official Data Transmission Service limits](https://help.aliyun.com/zh/maxcompute/overview-of-dts)
 
 These are **Commit calls, not Kafka messages or data rows**. A batch of 6,000 rows that uses one Commit needs one token. TableB has its own quota.
 
