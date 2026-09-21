@@ -24,6 +24,8 @@ public final class FairGrantConfig {
     private final long pendingTtlMs;
     private final FallbackMode fallbackMode;
     private final int redisTimeoutMs;
+    private final long stateIdleTtlMs;
+    private final boolean redisTestOnBorrow;
     private final long windowMs;
     private final int windowMaxPermits;
 
@@ -36,6 +38,8 @@ public final class FairGrantConfig {
         this.pendingTtlMs = b.pendingTtlMs;
         this.fallbackMode = b.fallbackMode;
         this.redisTimeoutMs = b.redisTimeoutMs;
+        this.stateIdleTtlMs = b.stateIdleTtlMs;
+        this.redisTestOnBorrow = b.redisTestOnBorrow;
         this.windowMs = b.windowMs;
         this.windowMaxPermits = b.windowMaxPermits;
     }
@@ -71,8 +75,20 @@ public final class FairGrantConfig {
         return fallbackMode;
     }
 
+    /** Per connection, socket read and pool borrow timeout; not an end-to-end deadline. */
     public int getRedisTimeoutMs() {
         return redisTimeoutMs;
+    }
+
+    /** Minimum idle retention. Effective retention also covers all quota and lease horizons. */
+    public long getStateIdleTtlMs() { return stateIdleTtlMs; }
+
+    public boolean isRedisTestOnBorrow() { return redisTestOnBorrow; }
+
+    /** Includes a millisecond guard against timestamp rounding. */
+    public long getEffectiveStateTtlMs() {
+        return Math.max(stateIdleTtlMs, Math.max((long) Math.ceil(burst / ratePerSec * 1000D),
+                Math.max(windowMs, Math.max(permitTtlMs, pendingTtlMs)))) + 1L;
     }
 
     /** Optional rolling window duration; zero means disabled. */
@@ -101,6 +117,8 @@ public final class FairGrantConfig {
         private long pendingTtlMs = 5_000L;
         private FallbackMode fallbackMode = FallbackMode.DENY;
         private int redisTimeoutMs = 200;
+        private long stateIdleTtlMs = 60_000L;
+        private boolean redisTestOnBorrow;
         private long windowMs;
         private int windowMaxPermits;
 
@@ -165,6 +183,19 @@ public final class FairGrantConfig {
             return this;
         }
 
+        /** Minimum idle retention; longer safety horizons always take precedence. */
+        public Builder stateIdleTtlMs(long value) {
+            if (value <= 0) throw new IllegalArgumentException("stateIdleTtlMs must be > 0");
+            this.stateIdleTtlMs = value;
+            return this;
+        }
+
+        /** Owned pool only. Default false; idle validation remains enabled. */
+        public Builder redisTestOnBorrow(boolean value) {
+            this.redisTestOnBorrow = value;
+            return this;
+        }
+
         public Builder redisTimeoutMs(int redisTimeoutMs) {
             if (redisTimeoutMs <= 0) {
                 throw new IllegalArgumentException("redisTimeoutMs must be > 0");
@@ -180,6 +211,11 @@ public final class FairGrantConfig {
             }
             if (config.hasSlidingWindow() && fallbackMode != FallbackMode.DENY) {
                 throw new IllegalArgumentException("slidingWindow requires DENY fallback");
+            }
+            if (!Double.isFinite(config.burst / config.ratePerSec * 1000D)
+                    || config.burst / config.ratePerSec * 1000D > Long.MAX_VALUE / 1_000_000L
+                    || stateIdleTtlMs >= Long.MAX_VALUE / 1_000_000L) {
+                throw new IllegalArgumentException("state retention/refill horizon is too large");
             }
             if (config.localShareIntervalMs() > Long.MAX_VALUE / 1_000_000L
                     || permitTtlMs > Long.MAX_VALUE / 1_000_000L

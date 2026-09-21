@@ -21,7 +21,7 @@ final class FairGrantKeys {
     private static String encode(String value) {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
-    private String base(String resource) { return prefix + "v3:{" + encode(resource) + "}:"; }
+    private String base(String resource) { return prefix + "v4:{" + encode(resource) + "}:"; }
     String bucket(String resource) { return base(resource) + "bucket"; }
     String wait(String resource) { return base(resource) + "wait"; }
     String window(String resource) { return base(resource) + "window"; }
