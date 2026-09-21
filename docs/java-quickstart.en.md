@@ -2,6 +2,10 @@
 
 [Back to README](../README.md)
 
+Plain Java and the Spring Boot starter share the same core and release version on `main`. Depend only on the core artifact below; Spring and the starter are not required.
+
+[Run the plain Java multi-process example](../examples/quickstart/README.md).
+
 ## Use it in your application
 
 Run `mvn install -DskipTests` first, then add the dependency (not yet on Maven Central):

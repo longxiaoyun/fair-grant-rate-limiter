@@ -11,17 +11,26 @@ Java processes share a token bucket, acquire tokens in waiting order, and execut
 
 ![At most 6 tokens in a 10s window, allocated fairly across machines](docs/images/allocation.en.svg)
 
+## Choose an integration
+
+`main` supports both integrations with one shared core implementation. No branch switch is required; both artifacts use the same release version.
+
+| Application | Dependency | Guide |
+|---|---|---|
+| Spring Boot (default below) | `fair-grant-spring-boot-starter`, which includes the core | [Spring Boot](spring-boot-starter/README.md) |
+| Plain Java / non-Spring | `fair-grant-rate-limiter`, with no Spring dependency | [Plain Java](docs/java-quickstart.en.md) |
+
 ## Try it locally
 
-With Java 8+, Maven, Redis 5+ and Python 3.8+ installed, run from the repository root:
+With Java 17+, Maven, Redis 6+ and Python 3.8+ installed, run the Spring Boot example from the repository root:
 
 ```bash
-python3 examples/quickstart/run.py
+python3 examples/spring-boot/run.py
 ```
 
-The script builds the library and a standalone consumer, starts temporary Redis and **three Java processes**, and runs four operations per process under a shared **6-token / 10s** limit. It prints the observed grant order and validation results, then stops its services. It does not use an existing Redis instance.
+The script starts temporary Redis and **three Spring Boot processes**, each performing three HTTP operations. It checks fair allocation and **at most 4 tokens in a 2s window**, then stops its services.
 
-[Standalone example and scenarios](examples/quickstart/README.md)
+[Spring Boot example](examples/spring-boot/README.md) · [Plain Java example (Java 8+)](examples/quickstart/README.md)
 
 ## Spring Boot integration
 
