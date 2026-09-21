@@ -2,7 +2,7 @@
 
 [返回项目介绍](../README.zh-CN.md) · [English](reference.md)
 
-首次了解项目，请先读 README 的业务例子和接入步骤。本页供接入时查配置、处理重试与故障，以及升级旧版本时使用。Kafka 多表消息、本地攒批和同表提交的业务背景见 README；[本轮场景评审](scenario-review.zh-CN.md)记录了窗口反例及其修复验证。
+首次了解项目，请先从 README 运行独立示例。本页供接入时查配置、处理重试与故障，以及升级旧版本时使用。Kafka 多表消息、本地攒批和同表提交的业务背景见[接入案例](kafka-odps.zh-CN.md)；[本轮场景评审](scenario-review.zh-CN.md)记录了窗口反例及其修复验证。
 
 ## 配置
 
