@@ -12,8 +12,8 @@
     <name>fair-grant-rate-limiter</name>
     <description>
         Distributed fair token-grant rate limiter on Redis + Jedis + Lua.
-        Enforces a shared per-key rate across JVMs while granting permits
-        fairly (longest-waiting / least-recently-granted first) to avoid starvation.
+        Distributes shared per-resource tokens in FIFO order among live waiting clients.
+        Coordinates rate-limited operations across JVMs without owning application data or execution.
         Requires Java 8+; builds and runs on Java 8, 11, and 17.
     </description>
     <url>https://github.com/longxiaoyun/fair-grant-rate-limiter</url>
@@ -123,6 +123,17 @@
     </build>
 
     <profiles>
+        <profile>
+            <id>real-redis</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration><includes>
+                    <include>**/*Test.java</include>
+                    <include>**/*IT.java</include>
+                </includes></configuration>
+            </plugin></plugins></build>
+        </profile>
         <!-- Explicit JDK profiles for CI matrix: -Pjdk8 / -Pjdk11 / -Pjdk17 -->
         <profile>
             <id>jdk8</id>

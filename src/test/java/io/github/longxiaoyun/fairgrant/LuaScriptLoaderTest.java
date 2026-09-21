@@ -13,10 +13,10 @@ public class LuaScriptLoaderTest {
         assertTrue(grant.contains("GRANTED"));
 
         String register = LuaScriptLoader.load("lua/register_pending.lua");
-        assertTrue(register.contains("SADD"));
+        assertTrue(register.contains("ZADD"));
 
         String clear = LuaScriptLoader.load("lua/clear_pending.lua");
-        assertTrue(clear.contains("SREM"));
+        assertTrue(clear.contains("ZREM"));
     }
 
     @Test(expected = IllegalStateException.class)

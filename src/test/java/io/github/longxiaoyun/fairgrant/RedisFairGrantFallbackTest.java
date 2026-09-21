@@ -57,8 +57,10 @@ public class RedisFairGrantFallbackTest {
 
         AcquireResult wait = limiter.tryAcquire("k", "m1");
         // second call within local interval should wait (still degraded path)
-        assertTrue(wait.getStatus() == AcquireResult.Status.WAIT
-                || wait.getStatus() == AcquireResult.Status.DEGRADED_LOCAL);
+        assertEquals(AcquireResult.Status.WAIT, wait.getStatus());
+        assertFalse(wait.isGranted());
+        limiter.clearPending("k", "m1");
+        assertFalse(limiter.tryAcquire("k", "m1").isGranted());
         limiter.close();
     }
 
@@ -94,5 +96,15 @@ public class RedisFairGrantFallbackTest {
         assertTrue(r.isGranted());
         assertTrue(r.getDetail(), r.getDetail().startsWith("redis_down_allow"));
         limiter.close();
+    }
+
+    @org.junit.Test public void unexpectedRuntimeFailureMustNotFailOpen() {
+        try (redis.clients.jedis.JedisPool broken = new redis.clients.jedis.JedisPool() {
+            @Override public redis.clients.jedis.Jedis getResource() { throw new IllegalStateException("unexpected"); }
+        }) {
+            RedisFairGrantLimiter lim = new RedisFairGrantLimiter(broken,
+                FairGrantConfig.builder().fallbackMode(FairGrantConfig.FallbackMode.ALLOW).build());
+            org.junit.Assert.assertEquals(AcquireResult.Status.ERROR,lim.tryAcquire("k","a").getStatus());
+        }
     }
 }

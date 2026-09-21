@@ -4,89 +4,138 @@ English | [中文](README.zh-CN.md)
 
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Java](https://img.shields.io/badge/Java-8%20%7C%2011%20%7C%2017-orange.svg)](#requirements)
 
-Many machines, one shared quota, and nobody gets stuck at the back of the line.
+**Fair token-bucket allocation across machines within a time window and a fixed token budget.**
 
-This is a small Java library. It uses Redis and a Lua script to hand out permits for a shared limit, such as “this table may be committed 5 times per second”. All JVMs draw from the same bucket. When more than one machine is waiting, the one that has waited the longest gets the next permit.
+Built with Java, Redis and Lua. Machines accessing the same resource share a token quota, acquire tokens in waiting order, and execute their own tasks when granted.
 
-It does not move your data. It only answers two questions: is there a permit left, and whose turn is it.
+## How are tokens distributed?
 
-## Contents
+Machines A, B and C share one token bucket: **at most 6 tokens in a 10s window**. Each token permits one operation. Configure this window with `slidingWindow(10_000L, 6)`.
 
-- [The problem](#the-problem)
-- [What it does and what it does not](#what-it-does-and-what-it-does-not)
-- [Compared with the usual options](#compared-with-the-usual-options)
-- [When to use it](#when-to-use-it)
-- [Requirements](#requirements)
-- [Install](#install)
-- [Usage](#usage)
-- [How a permit is chosen](#how-a-permit-is-chosen)
-- [Configuration](#configuration)
-- [If Redis is down](#if-redis-is-down)
-- [Layout](#layout)
-- [Build and test](#build-and-test)
-- [Limitations](#limitations)
-- [Contributing](#contributing)
-- [License](#license)
+![Three machines share six tokens: ready clients take turns and idle clients reserve no quota](docs/images/allocation.en.svg)
 
-## The problem
+The figure shows grant order in two independent scenarios. Actual grant times also depend on token refill and task readiness. FIFO applies to waiting clients that keep retrying and renewing their leases.
 
-Cloud quotas are often per resource, not per machine. A table might allow 5 commits per second. If you have 35 writers, three common shortcuts all miss something:
+## Features
 
-- Split the limit locally (`5 / 35` on each machine). You will not exceed the cloud limit, but idle machines waste their share, and every machine is slower than it needs to be.
-- Put one token bucket in Redis and let everyone race. The total stays under the limit, but the machine that calls most often keeps winning.
-- Take a distributed lock, then update a local counter. The lock stops two writers from updating at the same instant. It does not remember who has been waiting.
+- **Shared resource quotas**: all clients of a resource share one token bucket with a configured refill rate and burst capacity. Different resources have independent quotas.
+- **FIFO allocation**: clients with valid waiting leases receive tokens in queue order. A grant removes the client from its current turn; new work joins the tail.
+- **Optional strict rolling window**: cap new grants within any configured duration, such as at most 75 grants in 15 seconds, alongside the token bucket.
+- **Acquisition retry deduplication**: retry an acquisition using its request ID within the receipt retention period without consuming quota again.
+- **Non-blocking integration**: acquisition returns a grant result or a suggested retry delay; the application schedules execution and retries.
 
-The missing piece is a shared counter plus a queue of who is still waiting.
+Requires Java 8+ and Redis 5+. Integrates as a Java library without a separate token distribution service.
 
-|  | Each machine limits itself (total ÷ machine count) | Everyone races for one bucket | Grab a lock first | **This library** |
-|--|--|--|--|--|
-| Can the machines together go over the cloud limit? | No, but spare quota on idle machines is wasted | No. One shared bucket | Not really guaranteed. A lock does not count uses | No. One shared bucket |
-| Does the busiest machine keep going first? | There is no race. Each machine only has its own slice | Yes. More calls, more wins | Yes. Whoever takes the lock goes first | No. Longest wait goes first |
-| Can a machine fail to submit for a long time? | Unlikely, but every machine is slowed down | Yes. A quiet caller can lose forever | Yes. The lock does not track wait time | No. A miss moves that machine forward |
+## Why this library exists
 
-## What it does and what it does not
+The project comes from a Kafka → ODPS (MaxCompute) ingestion pipeline.
 
-It does:
+### One topic carries data for many tables
 
-- Keep one token bucket per resource key, shared by every JVM that can reach the same Redis.
-- Pick the waiting client with the oldest “last granted” time.
-- Return immediately. `WAIT` means “try again later”, not “sleep here”.
-- Keep a short-lived permit so a retry of the same call does not spend a second token.
-- Fall back to a local limit if Redis cannot be reached.
+Each Kafka message contains the destination ODPS table, its structure and the row data. Messages for different tables share a topic, for example:
 
-It does not:
-
-- Store payloads, rows, or commit bodies in Redis. Only counters, wait order, and a permit flag.
-- Replace a general traffic product such as Sentinel. Those products cap QPS. They do not decide which machine’s turn it is.
-- Partition Kafka or pin a table to one consumer. Fairness here is across clients that still have local work, not across message keys.
-- Talk to MaxCompute, ODPS, or any other cloud API. You call those yourself after a permit is granted.
-
-## When to use it
-
-Use it when several processes share one hard quota, and a chatty process must not crowd out the others. The original case is many writers committing to the same table under a per-table commit limit.
-
-Skip it when one process owns the quota, or when you only need a local `RateLimiter`. A Redis round trip is wasted in that case.
-
-## Requirements
-
-- JDK 8, 11, or 17. The default build target is Java 8, so a Java 11 or 17 runtime can still run the jar.
-- Redis 5 or newer. The scripts use `EVAL` / `EVALSHA`.
-- Jedis 4.4.6, pulled in by Maven.
-- An SLF4J binding in your application. The library only depends on `slf4j-api`.
-
-`mvn test` uses [jedis-mock](https://github.com/fppt/jedis-mock). You do not need a Redis server to run the tests.
-
-## Install
-
-The artifact is not on Maven Central yet. Build it from this repo:
-
-```bash
-mvn clean install
+```json
+{"project":"demo","table":"tableA","tableSchema":[{"name":"id","type":"bigint"}],"data":{"id":101}}
+{"project":"demo","table":"tableB","tableSchema":[{"name":"event","type":"string"}],"data":{"event":"login"}}
+{"project":"demo","table":"tableA","tableSchema":[{"name":"id","type":"bigint"}],"data":{"id":102}}
 ```
 
-Then depend on it:
+This illustrates the information carried by messages; the library does not prescribe a message format.
+
+### Thirty consumers build their own per-table batches
+
+Suppose thirty nodes consume the topic. Each node groups rows by destination table in its own memory and prepares a batch when its application-defined size or age threshold is reached.
+
+Several nodes may receive rows for tableA, so several independent local batches can be ready to commit to the same table:
+
+| Node | Local tableA buffer | Local tableB buffer |
+|---|---|---|
+| Node 1 | 6,000 rows, ready to commit | Still accumulating |
+| Node 2 | 8,000 rows, ready to commit | No data |
+| … | … | … |
+| Node 30 | 3,000 rows, ready to commit | Another batch ready |
+
+**Node 1's tableA batch is not merged with node 2's batch.** They share the destination table's commit quota because both are committed to the same ODPS table.
+
+### The table has a shared commit limit
+
+The MaxCompute documentation lists **75 write Commit calls per table per 15 seconds**. This example commits through Tunnel `UploadSession.commit`. Commits to tableA from all thirty nodes count together; each node does not receive a separate allowance of 75. [Official Data Transmission Service limits](https://help.aliyun.com/zh/maxcompute/overview-of-dts)
+
+These are **Commit calls, not Kafka messages or data rows**. A batch of 6,000 rows that uses one Commit needs one token. TableB has its own quota.
+
+Two things must therefore work together:
+
+1. **Shared control per table:** every node committing tableA uses tableA's token bucket.
+2. **Fair distribution across nodes:** consumers with ready tableA batches take turns, rather than allowing the most frequent applicant to keep obtaining the tokens.
+
+## Where does Fair Grant fit?
+
+```mermaid
+flowchart TD
+    K["One Kafka topic<br/>Messages for tableA, tableB, and other tables"]
+    K --> N1["Consumer node 1<br/>Local per-table buffers and batches"]
+    K --> N2["Consumer node 2<br/>Local per-table buffers and batches"]
+    K --> N30["Other nodes … 30<br/>Their own local batches"]
+    N1 --> F["Batch ready, immediately before Commit<br/>Call Fair Grant inside each node"]
+    N2 --> F
+    N30 --> F
+    F <--> R["Shared Redis<br/>tableA: token bucket + waiting queue<br/>tableB: independent bucket + queue"]
+    F -->|"Token granted"| C["Granted node commits its own local batch"]
+    C --> O["ODPS / MaxCompute<br/>Destination table"]
+    F -->|"WAIT"| W["Keep the batch on its original node<br/>Retry acquisition after the suggested delay"]
+```
+
+Fair Grant is a library embedded in each Java process, not another service to deploy. Redis stores token and waiting state; consumers retain ownership of messages, table structures and batch data.
+
+**Acquire after a batch is ready and immediately before its actual Commit.** Do not acquire for each Kafka message or reserve a queue position for a batch that cannot yet commit.
+
+## How are tokens distributed fairly?
+
+Suppose nodes 1, 2 and 3 have ready tableA batches and join its waiting queue in that order:
+
+| Token | Recipient | Next action |
+|---|---|---|
+| First | Node 1 | Commit its tableA batch; rejoin the tail when another batch is ready. |
+| Second | Node 2 | Commit its own tableA batch. |
+| Third | Node 3 | Commit its own tableA batch. |
+| Subsequent | The current ready waiter at the head | Continue in waiting order. |
+
+If all thirty nodes continuously have ready batches and renew/retry normally, they take turns. At a smooth five tokens per second, a full round of thirty nodes would ideally take about six seconds; this is not a promise about commit completion time.
+
+If only three nodes have ready batches, only those three participate. No quota is reserved for the other twenty-seven idle nodes. Waiting for tableA does not consume tableB's tokens.
+
+Fairness is per **consumer node with a ready batch for the same destination table**, not weighted by Kafka partition, message count or batch row count.
+
+## General-purpose concepts behind the example
+
+| Concept | Meaning | Kafka → ODPS example |
+|---|---|---|
+| `resourceKey` | Which operations share one quota | Complete destination table identity |
+| `clientId` | Which client receives a fair turn | Stable consumer process identity |
+| Ready work | An operation that can execute after a grant | A local batch prepared for commit |
+| One token | One opportunity to perform a controlled operation | One `UploadSession.commit` call attempt |
+| `ratePerSec` / `burst` | Refill rate and capacity for the resource | Settings derived from the table's commit quota |
+
+The same mechanism can coordinate services sharing one third-party API account, or workers sharing a service's call quota. Use the appropriate quota identity as the resource key, then perform your own operation after a grant. Fairness concerns operation opportunities, not data volume; it does not limit the number of operations in flight.
+
+**ODPS is a real use case. Shared per-resource quota and fair distribution among waiting clients are the library's responsibilities.**
+
+## ODPS example: the 75-per-15-second limit and token-bucket configuration
+
+`75 / 15 = 5` gives a refill rate, but **five tokens per second on average is not automatically a guarantee of at most 75 commits in every 15-second window**. Burst capacity and actual commit timing also matter.
+
+Add `.slidingWindow(15_000L, 75)` to enforce a strict rolling window. One Redis Lua operation checks token availability, new grants in the last 15 seconds, and the FIFO queue head. A new grant requires all three checks to pass. Even with `rate=5, burst=5`, every interval `(t−15s, t]` contains at most 75 new grants.
+
+The example combines `burst=1` for smoothing with the strict window. Duration and count are application settings; no ODPS-specific rule is built in. Without this option, the library remains a fair token bucket.
+
+The window covers **new grant timestamps in Redis**. Execute promptly and acquire new quota for each business retry; SDK-internal retries must also be accounted for. `FairGrantExecutor` acquires fresh quota and immediately invokes one operation, but network timing and SDK behavior still require application integration testing.
+
+The cited quota concerns per-table write Commit calls. Other Catalog API metadata methods have their own limits; do not apply this number to every Catalog method. [Catalog API limits](https://help.aliyun.com/en/maxcompute/catalogapi-sdk-user-guide)
+
+## Integrating with existing consumers
+
+Requires Java 8+ and Redis 5+. The package is not on Maven Central yet. Run `mvn clean install` in this repository, then add:
 
 ```xml
 <dependency>
@@ -96,163 +145,76 @@ Then depend on it:
 </dependency>
 ```
 
-## Usage
-
-Create one limiter and share it. It is safe to call from many threads. `clientId` should stay the same for the life of the process, usually the host address. `resourceKey` is the thing the cloud quota applies to, usually `project:table`. Keys are stored in lower case, so `MyTable` and `mytable` are the same resource.
+### 1. Create one limiter per consumer process
 
 ```java
+import io.github.longxiaoyun.fairgrant.*;
+import java.util.UUID;
+
 FairGrantConfig config = FairGrantConfig.builder()
-    .keyPrefix("odps:fair:")
-    .ratePerSec(5.0)          // the cloud limit for this key
-    .burst(5.0)               // how many permits may pile up while idle
-    .permitTtlMs(20_000L)     // drop a permit if the caller dies mid-call
-    .writerNodes(35)          // only used when Redis is down
-    .fallbackMode(FairGrantConfig.FallbackMode.LOCAL_SHARE)
+    .keyPrefix("odps:commit:")
+    .ratePerSec(5.0) // Token refill rate per table across ALL nodes
+    .burst(1.0)     // Smooth grants instead of accumulating commit tokens
+    .slidingWindow(15_000L, 75) // At most 75 new grants in any 15 seconds
+    .fallbackMode(FairGrantConfig.FallbackMode.DENY)
     .build();
 
-RedisFairGrantLimiter limiter = FairGrantLimiters.redis(jedisPool, config);
-String clientId = InetAddress.getLocalHost().getHostAddress();
-String resourceKey = "my_project:my_table";
+// Local demo address; all thirty deployed nodes must connect to the same Redis service.
+RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
+String clientId = UUID.randomUUID().toString(); // Generate once at process startup
+```
 
-AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
-if (result.getStatus() == AcquireResult.Status.GRANTED
-        || result.getStatus() == AcquireResult.Status.DEGRADED_LOCAL) {
-    try {
-        commitTable();
-    } finally {
-        limiter.invalidatePermit(resourceKey, clientId);
-    }
-} else {
-    // WAIT or ERROR. Keep the batch local and retry after result.getRetryAfterMs().
+The process shares this limiter across tables. Different resourceKeys select independent table buckets.
+
+| Parameter | Value |
+|---|---|
+| `resourceKey` | Complete destination table identity, such as `demo:tableA`, identical across nodes. Include project, schema namespace and table when schema namespaces are enabled. |
+| `clientId` | Stable, unique consumer process identity; distinguish multiple JVMs on one host. |
+
+Do not append Kafka partition, the message's column-structure hash, local batch ID or ODPS partition value to a table's quota key: that would split one table into independent buckets. The column structure carried in a message is distinct from a MaxCompute schema namespace. Resource names are lowercased.
+
+### 2. Acquire for a ready batch immediately before Commit
+
+For Tunnel, acquire at this boundary: create UploadSession → write blocks and close the writer → acquire a commit token → `UploadSession.commit(blocks)`. Do not acquire before a lengthy upload. [Official interface documentation](https://help.aliyun.com/en/maxcompute/uploadsession)
+
+Assume the application has selected and fixed a `readyBatch`, with all preparation required before the actual Commit complete:
+
+```java
+String resourceKey = "demo:tableA"; // Derive from readyBatch's destination table identity
+FairGrantExecutor executor = new FairGrantExecutor(limiter);
+AcquireResult result = executor.tryExecute(resourceKey, clientId,
+    () -> commitPreparedBatchOnce(readyBatch));
+
+if (result.getStatus() == AcquireResult.Status.ERROR) {
+    retainBatchAndAlert(readyBatch, result.getDetail());
+} else if (!result.isGranted()) {
+    scheduleSameBatch(readyBatch, result.getRetryAfterMs()); // Keep locally; acquire again later
 }
 ```
 
-There is a shortcut if you already split project and table:
+These three business methods belong to your consumer; they are not Kafka/ODPS APIs provided by the library. Use one submission coordinator per node/table to prevent two threads from committing the same batch.
 
-```java
-limiter.tryAcquire("my_project", "my_table", clientId);
-```
+- **One token covers one actual Commit attempt.** If Commit fails and another call is needed, acquire a new token instead of reusing one grant for unlimited retries.
+- Both acquisition and Commit can involve network waits. Do not sleep for tokens on the Kafka poll thread; use your batch scheduler for retries.
+- Keep the batch on WAIT. Memory bounds, consumer pause/resume and safe Kafka offset advancement are application responsibilities; buffering a message in memory is not durable ODPS delivery.
+- When cancelling waiting work, call clearPending only if this node has no other ready batches for that table. No token release is needed after a normal grant.
+- On Redis failure, this example uses DENY to pause grants. LOCAL_SHARE and ALLOW cannot preserve the global per-table quota guarantee.
 
-If you would rather not pass in a pool:
+## Scope and further reading
 
-```java
-RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
-// limiter.close() also closes the pool it created
-```
+The repository provides **shared per-resource token buckets and fair token distribution among clients with ready work**. It does not own Kafka consumption, table-structure parsing, local batching, ODPS Commit or offset management.
 
-### Call it in this order
+- [Review against the actual Kafka → ODPS scenario (Chinese)](docs/scenario-review.zh-CN.md)
+- [Configuration, acquisition retries, waiting leases and internals](docs/reference.md)
+- [Migration](docs/reference.md#migrating-from-the-old-snapshot): old implementations, v2 and the current v3 protocol must not run together.
 
-1. While this process still has work for the key, call `tryAcquire`. That also registers the client as waiting. You can call `registerPending` earlier if you want a place in line before the first try.
-2. On `GRANTED`, do the limited call, then `invalidatePermit`. Do this on failure too, or the permit sits until `permitTtlMs`.
-3. When the local queue for that key is empty, call `clearPending`. If you forget, this client stays in the line and can block machines that actually have work.
-4. On `WAIT`, do not sleep on the worker thread. Put the batch back and retry after `getRetryAfterMs()`.
-
-A granted permit is idempotent until you invalidate it or it expires. If the process retries `tryAcquire` after a network blip and the permit is still there, Redis returns `existing_permit` and does not spend another token.
-
-### What the result means
-
-| Status | Go ahead? | What to do |
-|--------|-----------|------------|
-| `GRANTED` | Yes | Run the call, then `invalidatePermit` |
-| `WAIT` | No | Retry after `getRetryAfterMs()`. `getDetail()` says why: `no_token`, or `not_selected:<clientId>` |
-| `DEGRADED_LOCAL` | Yes, under the fallback rules | Redis failed and the configured fallback allowed this call. Check `getRetryAfterMs()` as well: if it is greater than 0, the local slice for this interval is already used |
-| `ERROR` | No | Unexpected result. Back off and retry |
-
-`isGranted()` is true for both `GRANTED` and `DEGRADED_LOCAL`. If you care about the Redis-down case, read `getStatus()` too.
-
-## How a permit is chosen
-
-Each resource has four Redis keys. The default prefix is `fair:grant:`.
-
-| Key | Type | What it holds |
-|-----|------|----------------|
-| `{prefix}{resource}:bucket` | hash | `tokens` and `ts`, the shared bucket |
-| `{prefix}{resource}:wait` | sorted set | one entry per client, score is the last time that client was granted |
-| `{prefix}{resource}:pending` | set | clients that still have local work |
-| `{prefix}{resource}:permit:{clientId}` | string | set while that client is allowed to run, with a millisecond TTL |
-
-`tryAcquire` runs `src/main/resources/lua/fair_grant.lua` in one Redis call:
-
-1. Make sure this client is in `pending`. If it has never been granted, its wait score is “now”, so older waiters stay ahead.
-2. Refill the bucket: `min(burst, tokens + rate * seconds since last refill)`.
-3. If there is less than 1 token, return `WAIT` and how long to wait for the next token.
-4. Otherwise walk the wait set from the oldest score and pick the first client that is still pending. Clients that left the pending set are removed.
-5. If this caller is that client, subtract one token, set the permit, and move its wait score to now.
-6. If someone else was picked, return `WAIT` with `not_selected:<that client>`. No token is spent.
-
-So a machine that just won goes to the back. A machine that has not won stays near the front. That is the whole fairness rule.
-
-## Configuration
-
-| Option | Default | Meaning |
-|--------|---------|---------|
-| `keyPrefix` | `fair:grant:` | Namespace, so several apps can share one Redis |
-| `ratePerSec` | `5` | Tokens added per second, shared by all clients of this key |
-| `burst` | same as `ratePerSec` | Cap on stored tokens. A long idle period cannot dump a huge burst later |
-| `permitTtlMs` | `20000` | Safety timer. If a process dies after `GRANTED` and never invalidates, the permit disappears and others can proceed |
-| `writerNodes` | `10` | Used only by `LOCAL_SHARE`. It is your estimate of how many writers exist, not something Redis discovers |
-| `fallbackMode` | `LOCAL_SHARE` | What to do when Redis throws |
-| `redisTimeoutMs` | `200` | Socket timeout for `FairGrantLimiters.redis(host, port, config)`, and the retry hint used by `DENY` |
-
-Set `ratePerSec` to the cloud limit for that key, not to `cloud limit / machine count`. The division is only for the Redis-down fallback.
-
-## If Redis is down
-
-| Mode | What the caller sees |
-|------|----------------------|
-| `LOCAL_SHARE` | This process allows about `ratePerSec / writerNodes`. The result status is `DEGRADED_LOCAL`. This can still exceed the cloud limit if every machine falls back at once, because each one only knows its own slice |
-| `DENY` | Always `WAIT`. Nothing is submitted until Redis is back. Safe for a hard quota, and it can stall writers |
-| `ALLOW` | Always grants. Do not use this when going over the cloud limit is expensive |
-
-`clearPending` still clears the local fallback slot for that key, even if the Redis call fails.
-
-## Layout
-
-```
-src/main/java/io/github/longxiaoyun/fairgrant
-├── FairGrantLimiter.java            API
-├── RedisFairGrantLimiter.java       Redis + Lua
-├── LocalShareFairGrantLimiter.java  in-process fallback
-├── FairGrantConfig.java
-├── AcquireResult.java
-└── FairGrantLimiters.java           factories
-
-src/main/resources/lua
-├── fair_grant.lua
-├── register_pending.lua
-└── clear_pending.lua
-```
-
-## Build and test
+## Development and tests
 
 ```bash
 mvn clean test
-mvn -Pjdk8  clean test
-mvn -Pjdk11 clean test
-mvn -Pjdk17 clean test
+mvn -Preal-redis clean verify
 ```
 
-The suite covers config and key formatting, the local fallback, grant and rotation against embedded Redis, a check that one client cannot win every round, a concurrent burst cap, and the three Redis-down modes.
-
-GitHub Actions runs the same tests on Temurin 8, 11, and 17.
-
-## Limitations
-
-- Fairness is only among clients that are still pending. A client that never calls, or that called `clearPending`, is not in line.
-- `clientId` must be stable. If it changes every call, that process looks like a new waiter and can cut in.
-- All writers must see the same Redis. Two Redis instances means two buckets.
-- The Lua script is the critical section. Do not wrap `tryAcquire` in your own distributed lock. That brings back the “whoever grabs the lock goes first” problem.
-- Clock skew between machines does not decide the order. Wait scores are written from the time each caller passes in, and Redis `TIME` is only a fallback inside the script. Large clock jumps on one machine can still skew its own score.
-- This is a personal project under `io.github.longxiaoyun`. It is not an Alibaba product.
-
-## Contributing
-
-Issues and pull requests are welcome.
-
-- Keep the source compatible with Java 8 unless we agree otherwise.
-- If you change grant behavior, add or adjust a test.
-- Run `mvn clean test` before opening a PR.
-
-## License
+The second command requires a local redis-server. It starts temporary Redis instances and validates multi-JVM grants and test HTTP calls. It does not connect to production Kafka or ODPS and does not replace validation of the actual ingestion pipeline. See [test coverage](docs/reference.md#build-and-end-to-end-validation).
 
 [Apache License 2.0](LICENSE).

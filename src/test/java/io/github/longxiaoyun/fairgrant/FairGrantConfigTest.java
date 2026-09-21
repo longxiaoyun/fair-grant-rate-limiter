@@ -8,6 +8,24 @@ import static org.junit.Assert.assertTrue;
 
 public class FairGrantConfigTest {
 
+    @Test public void fractionalRateGetsUsableBurst() {
+        assertEquals(1D, FairGrantConfig.builder().ratePerSec(.5).build().getBurst(), 0D);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsNaNRate() {
+        FairGrantConfig.builder().ratePerSec(Double.NaN);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsInfiniteRate() {
+        FairGrantConfig.builder().ratePerSec(Double.POSITIVE_INFINITY);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsTinyBurst() {
+        FairGrantConfig.builder().burst(.5);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsNaNBurst() {
+        FairGrantConfig.builder().burst(Double.NaN);
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsBadLease() {
+        FairGrantConfig.builder().pendingTtlMs(0);
+    }
     @Test
     public void defaults() {
         FairGrantConfig c = FairGrantConfig.builder().build();
@@ -16,7 +34,7 @@ public class FairGrantConfigTest {
         assertEquals(5D, c.getBurst(), 0.0001);
         assertEquals(20_000L, c.getPermitTtlMs());
         assertEquals(10, c.getWriterNodes());
-        assertEquals(FairGrantConfig.FallbackMode.LOCAL_SHARE, c.getFallbackMode());
+        assertEquals(FairGrantConfig.FallbackMode.DENY, c.getFallbackMode());
         assertEquals(200, c.getRedisTimeoutMs());
     }
 
@@ -74,5 +92,27 @@ public class FairGrantConfigTest {
     @Test(expected = NullPointerException.class)
     public void rejectsNullKeyPrefix() {
         FairGrantConfig.builder().keyPrefix(null).build();
+    }
+
+    @Test public void windowDefaultsAndExplicitConfiguration() {
+        assertFalse(FairGrantConfig.builder().build().hasSlidingWindow());
+        FairGrantConfig c=FairGrantConfig.builder().slidingWindow(15000,75).build();
+        assertTrue(c.hasSlidingWindow()); assertEquals(15000,c.getWindowMs()); assertEquals(75,c.getWindowMaxPermits());
+    }
+    @Test public void invalidWindowsAndUnsafeFallbacksAreRejected() {
+        Runnable[] invalid={
+            () -> FairGrantConfig.builder().slidingWindow(0,1),
+            () -> FairGrantConfig.builder().slidingWindow(-1,1),
+            () -> FairGrantConfig.builder().slidingWindow(1,0),
+            () -> FairGrantConfig.builder().slidingWindow(1,-1),
+            () -> FairGrantConfig.builder().slidingWindow(Long.MAX_VALUE,1).build(),
+            () -> FairGrantConfig.builder().slidingWindow(1,1).fallbackMode(FairGrantConfig.FallbackMode.ALLOW).build(),
+            () -> FairGrantConfig.builder().fallbackMode(FairGrantConfig.FallbackMode.LOCAL_SHARE).slidingWindow(1,1).build(),
+            () -> new LocalShareFairGrantLimiter(FairGrantConfig.builder().slidingWindow(1,1).build()),
+            () -> FairGrantConfig.builder().ratePerSec(Double.MIN_VALUE).build(),
+            () -> FairGrantConfig.builder().burst(1e16).build()
+        };
+        for(Runnable r:invalid) { try { r.run(); org.junit.Assert.fail("accepted unsafe config"); }
+            catch(IllegalArgumentException expected) { } }
     }
 }

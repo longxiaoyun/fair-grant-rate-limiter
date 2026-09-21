@@ -5,6 +5,9 @@ import org.slf4j.LoggerFactory;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.exceptions.JedisException;
+import redis.clients.jedis.exceptions.JedisDataException;
+import redis.clients.jedis.exceptions.JedisNoScriptException;
+import java.util.UUID;
 
 import java.util.List;
 import java.util.Objects;
@@ -48,7 +51,7 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
         this.config = Objects.requireNonNull(config, "config");
         this.keys = new FairGrantKeys(config.getKeyPrefix());
         this.ownPool = ownPool;
-        this.localFallback = new LocalShareFairGrantLimiter(config);
+        this.localFallback = config.hasSlidingWindow() ? null : new LocalShareFairGrantLimiter(config);
         this.grantScript = LuaScriptLoader.load(SCRIPT_GRANT);
         this.registerScript = LuaScriptLoader.load(SCRIPT_REGISTER);
         this.clearScript = LuaScriptLoader.load(SCRIPT_CLEAR);
@@ -61,15 +64,26 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
 
     @Override
     public AcquireResult tryAcquire(String resourceKey, String clientId) {
+        return tryAcquireRequest(resourceKey, clientId, UUID.randomUUID().toString());
+    }
+
+    @Override
+    public AcquireResult tryAcquireRequest(String resourceKey, String clientId, String requestId) {
         ensureOpen();
         String resource = keys.normalizeResource(resourceKey);
         String client = requireClient(clientId);
+        String request = FairGrantKeys.requireId(requestId, "requestId");
         try {
-            return evalGrant(resource, client);
-        } catch (RuntimeException e) {
+            return evalGrant(resource, client, request);
+        } catch (JedisDataException e) {
+            return AcquireResult.error("redis_data_error:" + e.getMessage());
+        } catch (JedisException e) {
             LOG.warn("fair-grant Redis acquire failed, fallback={}, resource={}, client={}: {}",
                     config.getFallbackMode(), resource, client, e.toString());
-            return fallbackAcquire(resource, client, e);
+            return fallbackAcquire(resource, client, request, e);
+        } catch (RuntimeException e) {
+            LOG.error("fair-grant unexpected acquire failure", e);
+            return AcquireResult.error("unexpected_acquire_error:" + e.getClass().getSimpleName());
         }
     }
 
@@ -97,42 +111,41 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
             LOG.warn("fair-grant clearPending failed, resource={}, client={}: {}",
                     resource, client, e.toString());
         } finally {
-            localFallback.clearPending(resource, client);
+            if (localFallback != null) localFallback.clearPending(resource, client);
         }
     }
 
+    @Deprecated
     @Override
     public void invalidatePermit(String resourceKey, String clientId) {
         ensureOpen();
-        String resource = keys.normalizeResource(resourceKey);
-        String client = requireClient(clientId);
-        try (Jedis jedis = jedisPool.getResource()) {
-            jedis.del(keys.permit(resource, client));
-        } catch (RuntimeException e) {
-            LOG.warn("fair-grant invalidatePermit failed, resource={}, client={}: {}",
-                    resource, client, e.toString());
-        }
+        keys.normalizeResource(resourceKey);
+        requireClient(clientId);
+        // Receipts must survive completion. They expire automatically.
     }
 
     private enum ScriptKind {
         GRANT, REGISTER, CLEAR
     }
 
-    private AcquireResult evalGrant(String resource, String client) {
+    private AcquireResult evalGrant(String resource, String client, String request) {
         try (Jedis jedis = jedisPool.getResource()) {
-            Object raw = evalshaOrEval(jedis, ScriptKind.GRANT, grantScript, 4,
+            Object raw = evalshaOrEval(jedis, ScriptKind.GRANT, grantScript, 5,
                     new String[]{
                             keys.bucket(resource),
                             keys.wait(resource),
                             keys.pending(resource),
-                            keys.permit(resource, client)
+                            keys.permit(resource, client, request),
+                            keys.window(resource)
                     },
                     new String[]{
                             client,
                             Double.toString(config.getRatePerSec()),
                             Double.toString(config.getBurst()),
                             Long.toString(config.getPermitTtlMs()),
-                            Long.toString(System.currentTimeMillis())
+                            Long.toString(config.getPendingTtlMs()),
+                            Long.toString(config.getWindowMs()),
+                            Integer.toString(config.getWindowMaxPermits())
                     });
             return parseGrantResult(raw);
         }
@@ -140,25 +153,25 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
 
     private void evalRegister(String resource, String client) {
         try (Jedis jedis = jedisPool.getResource()) {
-            evalshaOrEval(jedis, ScriptKind.REGISTER, registerScript, 2,
+            evalshaOrEval(jedis, ScriptKind.REGISTER, registerScript, 3,
                     new String[]{
+                            keys.bucket(resource),
                             keys.wait(resource),
                             keys.pending(resource)
                     },
                     new String[]{
                             client,
-                            Long.toString(System.currentTimeMillis())
+                            Long.toString(config.getPendingTtlMs())
                     });
         }
     }
 
     private void evalClear(String resource, String client) {
         try (Jedis jedis = jedisPool.getResource()) {
-            evalshaOrEval(jedis, ScriptKind.CLEAR, clearScript, 3,
+            evalshaOrEval(jedis, ScriptKind.CLEAR, clearScript, 2,
                     new String[]{
                             keys.wait(resource),
-                            keys.pending(resource),
-                            keys.permit(resource, client)
+                            keys.pending(resource)
                     },
                     new String[]{client});
         }
@@ -182,7 +195,7 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
             }
         }
         Object result = jedis.eval(script, keyCount, keysAndArgs);
-        storeSha(kind, jedis.scriptLoad(script));
+        storeSha(kind, sha1(script));
         return result;
     }
 
@@ -215,9 +228,21 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
         }
     }
 
+    private static String sha1(String script) {
+        try {
+            byte[] hash = java.security.MessageDigest.getInstance("SHA-1")
+                    .digest(script.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : hash) hex.append(String.format("%02x", b & 0xff));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private static boolean isNoScript(Throwable e) {
         String msg = e.getMessage();
-        return msg != null && msg.contains("NOSCRIPT");
+        return e instanceof JedisNoScriptException || (msg != null && msg.startsWith("NOSCRIPT"));
     }
 
     @SuppressWarnings("unchecked")
@@ -236,18 +261,20 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
         if ("GRANTED".equalsIgnoreCase(status)) {
             return AcquireResult.granted(tokens, detail);
         }
+        if ("ERROR".equalsIgnoreCase(status)) return AcquireResult.error(detail);
         if ("WAIT".equalsIgnoreCase(status)) {
             return AcquireResult.waitFor(retryAfter, tokens, detail);
         }
         return AcquireResult.error("unknown_status:" + status + ":" + detail);
     }
 
-    private AcquireResult fallbackAcquire(String resource, String client, Exception cause) {
+    private AcquireResult fallbackAcquire(String resource, String client, String request, Exception cause) {
         switch (config.getFallbackMode()) {
             case LOCAL_SHARE:
-                AcquireResult local = localFallback.tryAcquire(resource, client);
-                return AcquireResult.degradedLocal(local.getRetryAfterMs(),
-                        "redis_down:" + cause.getClass().getSimpleName());
+                AcquireResult local = localFallback.tryAcquireRequest(resource, client, request);
+                if (!local.isGranted()) return AcquireResult.waitFor(local.getRetryAfterMs(), 0D, "redis_down_local_share_wait");
+                return AcquireResult.degradedLocal(0L,
+                        "redis_down:" + cause.getClass().getSimpleName() + ":" + local.getDetail());
             case DENY:
                 return AcquireResult.waitFor(config.getRedisTimeoutMs(), 0D,
                         "redis_down_deny:" + cause.getClass().getSimpleName());
