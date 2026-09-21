@@ -40,7 +40,8 @@ public final class AcquireResult {
     }
 
     public static AcquireResult degradedLocal(long retryAfterMs, String detail) {
-        return new AcquireResult(Status.DEGRADED_LOCAL, retryAfterMs, -1D, detail);
+        if (retryAfterMs > 0) return waitFor(retryAfterMs, -1D, detail);
+        return new AcquireResult(Status.DEGRADED_LOCAL, 0L, -1D, detail);
     }
 
     public static AcquireResult error(String detail) {
@@ -52,7 +53,7 @@ public final class AcquireResult {
     }
 
     public boolean isGranted() {
-        return status == Status.GRANTED || status == Status.DEGRADED_LOCAL;
+        return retryAfterMs == 0 && (status == Status.GRANTED || status == Status.DEGRADED_LOCAL);
     }
 
     public long getRetryAfterMs() {

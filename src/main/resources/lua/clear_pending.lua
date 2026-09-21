@@ -1,15 +1,4 @@
--- Clear pending + permit when local work for this key is idle.
--- KEYS[1] = wait zset
--- KEYS[2] = pending set
--- KEYS[3] = permit key
--- ARGV[1] = machineId
-
-local waitKey = KEYS[1]
-local pendingKey = KEYS[2]
-local permitKey = KEYS[3]
-local machineId = ARGV[1]
-
-redis.call('SREM', pendingKey, machineId)
-redis.call('ZREM', waitKey, machineId)
-redis.call('DEL', permitKey)
+-- KEYS = wait zset, lease zset; ARGV = client. Receipts remain until TTL.
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
 return 1

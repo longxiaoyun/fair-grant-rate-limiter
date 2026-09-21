@@ -77,8 +77,8 @@ public class RedisFairGrantLimiterTest {
 
     @Test
     public void existingPermitIsIdempotentAndDoesNotDoubleConsume() {
-        assertEquals(AcquireResult.Status.GRANTED, limiter.tryAcquire("k1", "m1").getStatus());
-        AcquireResult again = limiter.tryAcquire("k1", "m1");
+        assertEquals(AcquireResult.Status.GRANTED, limiter.tryAcquireRequest("k1", "m1", "request-1").getStatus());
+        AcquireResult again = limiter.tryAcquireRequest("k1", "m1", "request-1");
         assertEquals(AcquireResult.Status.GRANTED, again.getStatus());
         assertEquals("existing_permit", again.getDetail());
 
@@ -105,7 +105,7 @@ public class RedisFairGrantLimiterTest {
 
     @Test
     public void clearPendingAllowsOtherClientToWinImmediately() {
-        assertTrue(limiter.tryAcquire("k3", "m1").isGranted());
+        limiter.registerPending("k3", "m1");
         AcquireResult blocked = limiter.tryAcquire("k3", "m2");
         assertEquals(AcquireResult.Status.WAIT, blocked.getStatus());
         assertTrue(blocked.getDetail(), blocked.getDetail().startsWith("not_selected"));
@@ -116,7 +116,7 @@ public class RedisFairGrantLimiterTest {
 
     @Test
     public void waitWhenOtherSelected() {
-        assertTrue(limiter.tryAcquire("sel", "mA").isGranted());
+        limiter.registerPending("sel", "mA");
         AcquireResult r = limiter.tryAcquire("sel", "mB");
         assertFalse(r.isGranted());
         assertEquals(AcquireResult.Status.WAIT, r.getStatus());
@@ -125,9 +125,9 @@ public class RedisFairGrantLimiterTest {
 
     @Test
     public void projectTableConvenienceNormalizesCase() {
-        assertTrue(limiter.tryAcquire("MyProject", "MyTable", "host-1").isGranted());
+        assertTrue(limiter.tryAcquireRequest("MyProject:MyTable", "host-1", "req").isGranted());
         // same logical key
-        AcquireResult again = limiter.tryAcquire("myproject:mytable", "host-1");
+        AcquireResult again = limiter.tryAcquireRequest("myproject:mytable", "host-1", "req");
         assertEquals("existing_permit", again.getDetail());
     }
 
@@ -213,6 +213,7 @@ public class RedisFairGrantLimiterTest {
             assertNotNull("round " + round + " winner", winner);
             firstWave.add(winner);
             limiter.invalidatePermit(key, winner);
+            limiter.registerPending(key, winner);
         }
         assertEquals(5, firstWave.size());
 
@@ -228,6 +229,7 @@ public class RedisFairGrantLimiterTest {
             assertNotNull("refill round " + round, winner);
             secondWave.add(winner);
             limiter.invalidatePermit(key, winner);
+            limiter.registerPending(key, winner);
         }
         assertEquals(5, secondWave.size());
     }
@@ -367,13 +369,13 @@ public class RedisFairGrantLimiterTest {
 
     @Test
     public void redisKeysAreWrittenAsDocumented() {
-        assertTrue(limiter.tryAcquire("proj", "tbl", "host-a").isGranted());
+        assertTrue(limiter.tryAcquireRequest("proj:tbl", "host-a", "req").isGranted());
+        FairGrantKeys keys = new FairGrantKeys(config.getKeyPrefix());
         try (Jedis jedis = pool.getResource()) {
-            assertTrue(jedis.exists("ut:fair:proj:tbl:bucket"));
-            assertTrue(jedis.exists("ut:fair:proj:tbl:wait"));
-            assertTrue(jedis.exists("ut:fair:proj:tbl:pending"));
-            assertTrue(jedis.exists("ut:fair:proj:tbl:permit:host-a"));
-            assertEquals("1", jedis.get("ut:fair:proj:tbl:permit:host-a"));
+            assertTrue(jedis.exists(keys.bucket("proj:tbl")));
+            assertEquals(0L, jedis.zcard(keys.wait("proj:tbl")));
+            assertEquals(0L, jedis.zcard(keys.pending("proj:tbl")));
+            assertTrue(new java.math.BigDecimal(jedis.get(keys.permit("proj:tbl", "host-a", "req"))).longValueExact() > 0);
         }
     }
 
