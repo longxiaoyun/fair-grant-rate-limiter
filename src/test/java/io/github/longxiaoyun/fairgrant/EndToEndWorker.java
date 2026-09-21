@@ -12,7 +12,7 @@ public final class EndToEndWorker {
         String client = args[1];
         String endpoint = args[2];
         FairGrantConfig config = FairGrantConfig.builder().keyPrefix("e2e:")
-                .ratePerSec(20).burst(2).pendingTtlMs(10000).build();
+                .ratePerSec(20).burst(2).slidingWindow(500, 6).pendingTtlMs(10000).build();
         try (JedisPool pool = new JedisPool("127.0.0.1", port);
              RedisFairGrantLimiter limiter = new RedisFairGrantLimiter(pool, config);
              Jedis coordination = pool.getResource()) {

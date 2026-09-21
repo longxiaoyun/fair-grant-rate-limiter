@@ -9,6 +9,8 @@
 
 当多个进程共享同一资源的调用额度时，它同时负责两件事：**维护这份全局令牌桶，并把令牌按等待顺序分给有待执行任务的节点。**
 
+还可以叠加严格滑动窗口，例如任意 15 秒最多发放 75 个令牌。
+
 资源是什么、任务是什么、获得令牌后执行什么操作，由接入方定义。库不依赖 Kafka 或 ODPS SDK，也不内置任何云产品的配额规则。
 
 下面用催生这个库的 Kafka → ODPS 写入链路说明：为什么只有一个共享令牌桶还不够，公平分发解决了什么问题。
@@ -111,9 +113,11 @@ Fair Grant 是引入各个 Java 进程的库，无需额外部署分发服务。
 
 `75 / 15 = 5` 可以作为令牌补充速率，但**平均每秒 5 个令牌，不自动等于每个 15 秒窗口最多 75 次提交**，还要看桶容量和真正提交的时间。
 
-当前库实现的是令牌桶，没有额外的 15 秒窗口计数器。默认 `rate=5、burst=5` 允许初始突发，本轮评审在真实 Redis 上复现了 15 秒内获得 76 个令牌。因此不能把默认配置直接写成“已经保证 ODPS 的 75／15 秒限制”。
+可通过 `.slidingWindow(15_000L, 75)` 叠加严格滑动窗口。Redis 在同一次 Lua 操作中检查令牌桶、最近 15 秒的新令牌发放数和 FIFO 队首；三者都满足才发放。这样，即使配置 `rate=5、burst=5`，任意 `(t−15秒, t]` 内也最多发放 75 个新令牌。
 
-下面的示例使用 `rate=5、burst=1` 平滑发放，正常情况下相邻新令牌至少间隔约 200ms。获准后应立即进入实际 Commit；不能先囤令牌，再集中提交。生产接入还需核对 SDK 自动重试、其他写入程序和服务端计数边界，按需要降低速率留出余量。**严格的服务端窗口保证仍是需要完成的接入验证项。**
+下面同时配置 `burst=1` 平滑发放和严格窗口。窗口参数完全由业务指定，其他 API 可以设置自己的时长和次数。不配置窗口时，仍是普通公平令牌桶。
+
+窗口约束针对 **Redis 发放新令牌的时间**。获准后立即执行；应用重发业务请求必须重新申请，SDK 内部重试也要计入实际调用。`FairGrantExecutor` 提供“获取新额度后立即调用一次业务操作”的入口，但网络延迟和 SDK 行为仍需在接入应用中验证。
 
 官方上述限额针对单表写入 Commit；Catalog API 的其他元数据方法有各自的限额，不应统一套用这个数字。[Catalog API 限制说明](https://help.aliyun.com/en/maxcompute/catalogapi-sdk-user-guide)
 
@@ -139,6 +143,7 @@ FairGrantConfig config = FairGrantConfig.builder()
     .keyPrefix("odps:commit:")
     .ratePerSec(5.0) // 每张表跨全部节点的令牌补充速率
     .burst(1.0)     // 平滑发放，不积攒一批提交令牌
+    .slidingWindow(15_000L, 75) // 同一资源任意 15 秒最多 75 个新令牌
     .fallbackMode(FairGrantConfig.FallbackMode.DENY)
     .build();
 
@@ -164,13 +169,13 @@ String clientId = UUID.randomUUID().toString(); // 每个进程启动时生成�
 
 ```java
 String resourceKey = "demo:tableA"; // 从 readyBatch 的目标表身份生成
-AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
+FairGrantExecutor executor = new FairGrantExecutor(limiter);
+AcquireResult result = executor.tryExecute(resourceKey, clientId,
+    () -> commitPreparedBatchOnce(readyBatch));
 
-if (result.isGranted()) {
-    commitPreparedBatchOnce(readyBatch); // 获准后立即执行这一次实际 Commit
-} else if (result.getStatus() == AcquireResult.Status.ERROR) {
+if (result.getStatus() == AcquireResult.Status.ERROR) {
     retainBatchAndAlert(readyBatch, result.getDetail());
-} else {
+} else if (!result.isGranted()) {
     scheduleSameBatch(readyBatch, result.getRetryAfterMs()); // 批次仍在本地，稍后重新申请
 }
 ```
@@ -181,7 +186,7 @@ if (result.isGranted()) {
 - 获取令牌和 Commit 都可能涉及网络等待。不要在 Kafka poll 线程中睡眠等待令牌；由现有批次调度器安排重试。
 - `WAIT` 时保留批次。内存上限、消费暂停、恢复与 Kafka offset 的安全推进由消费者负责；只进入内存缓存并不表示数据已经写入 ODPS。
 - 如果取消等待，且本节点对该表没有其他就绪批次，调用 `clearPending`。正常获准后不需要释放令牌。
-- Redis 不可用时，示例使用 `DENY` 暂停发放。`LOCAL_SHARE` 和 `ALLOW` 都不能继续提供同表全局额度保证。
+- Redis 不可用时，示例使用 `DENY` 暂停发放。启用严格窗口时，配置会拒绝 `LOCAL_SHARE` 和 `ALLOW`。
 
 ## 范围与进一步阅读
 
@@ -189,7 +194,7 @@ if (result.isGranted()) {
 
 - [按真实 Kafka → ODPS 场景重新评审的结果](docs/scenario-review.zh-CN.md)
 - [配置、获取重试、等待租约与实现说明](docs/reference.zh-CN.md)
-- [旧版本迁移](docs/reference.zh-CN.md#从旧-snapshot-升级)：主分支旧实现与 PR 的 v2 实现不能混跑。
+- [旧版本迁移](docs/reference.zh-CN.md#从旧-snapshot-升级)：旧实现、v2 与当前 v3 协议不能混跑。
 
 ## 开发与测试
 

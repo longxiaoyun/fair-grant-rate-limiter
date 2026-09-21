@@ -375,7 +375,7 @@ public class RedisFairGrantLimiterTest {
             assertTrue(jedis.exists(keys.bucket("proj:tbl")));
             assertEquals(0L, jedis.zcard(keys.wait("proj:tbl")));
             assertEquals(0L, jedis.zcard(keys.pending("proj:tbl")));
-            assertTrue(Long.parseLong(jedis.get(keys.permit("proj:tbl", "host-a", "req"))) > 0);
+            assertTrue(new java.math.BigDecimal(jedis.get(keys.permit("proj:tbl", "host-a", "req"))).longValueExact() > 0);
         }
     }
 

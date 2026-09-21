@@ -97,4 +97,14 @@ public class RedisFairGrantFallbackTest {
         assertTrue(r.getDetail(), r.getDetail().startsWith("redis_down_allow"));
         limiter.close();
     }
+
+    @org.junit.Test public void unexpectedRuntimeFailureMustNotFailOpen() {
+        try (redis.clients.jedis.JedisPool broken = new redis.clients.jedis.JedisPool() {
+            @Override public redis.clients.jedis.Jedis getResource() { throw new IllegalStateException("unexpected"); }
+        }) {
+            RedisFairGrantLimiter lim = new RedisFairGrantLimiter(broken,
+                FairGrantConfig.builder().fallbackMode(FairGrantConfig.FallbackMode.ALLOW).build());
+            org.junit.Assert.assertEquals(AcquireResult.Status.ERROR,lim.tryAcquire("k","a").getStatus());
+        }
+    }
 }
