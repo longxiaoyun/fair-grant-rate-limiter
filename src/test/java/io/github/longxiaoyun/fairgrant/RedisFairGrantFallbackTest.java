@@ -107,4 +107,30 @@ public class RedisFairGrantFallbackTest {
             org.junit.Assert.assertEquals(AcquireResult.Status.ERROR,lim.tryAcquire("k","a").getStatus());
         }
     }
+
+    @Test public void loadingDatasetIsDeniedAsTemporaryUnavailability() {
+        try (JedisPool loading = new JedisPool() {
+            @Override public redis.clients.jedis.Jedis getResource() {
+                throw new redis.clients.jedis.exceptions.JedisDataException("LOADING Redis is loading the dataset in memory");
+            }
+        }) {
+            RedisFairGrantLimiter lim = new RedisFairGrantLimiter(loading,
+                    FairGrantConfig.builder().slidingWindow(1000, 1).build());
+            AcquireResult result = lim.tryAcquire("k", "a");
+            assertEquals(AcquireResult.Status.WAIT, result.getStatus());
+            assertTrue(result.getDetail().startsWith("redis_down_deny:"));
+            assertFalse(result.isGranted());
+        }
+    }
+    @Test public void otherDataErrorsRemainErrorsEvenWithAllowFallback() {
+        try (JedisPool broken = new JedisPool() {
+            @Override public redis.clients.jedis.Jedis getResource() {
+                throw new redis.clients.jedis.exceptions.JedisDataException("ERR bad script while LOADING data");
+            }
+        }) {
+            RedisFairGrantLimiter lim = new RedisFairGrantLimiter(broken,
+                    FairGrantConfig.builder().fallbackMode(FairGrantConfig.FallbackMode.ALLOW).build());
+            assertEquals(AcquireResult.Status.ERROR, lim.tryAcquire("k", "a").getStatus());
+        }
+    }
 }
