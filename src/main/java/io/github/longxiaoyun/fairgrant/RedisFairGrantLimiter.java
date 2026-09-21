@@ -76,6 +76,11 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
         try {
             return evalGrant(resource, client, request);
         } catch (JedisDataException e) {
+            // Redis accepts connections while replaying AOF/RDB but rejects commands.
+            // LOADING is temporary unavailability, not a malformed script or state.
+            if (e.getMessage() != null && e.getMessage().startsWith("LOADING ")) {
+                return fallbackAcquire(resource, client, request, e);
+            }
             return AcquireResult.error("redis_data_error:" + e.getMessage());
         } catch (JedisException e) {
             LOG.warn("fair-grant Redis acquire failed, fallback={}, resource={}, client={}: {}",
@@ -145,7 +150,8 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
                             Long.toString(config.getPermitTtlMs()),
                             Long.toString(config.getPendingTtlMs()),
                             Long.toString(config.getWindowMs()),
-                            Integer.toString(config.getWindowMaxPermits())
+                            Integer.toString(config.getWindowMaxPermits()),
+                            Long.toString(config.getEffectiveStateTtlMs())
                     });
             return parseGrantResult(raw);
         }
@@ -153,15 +159,17 @@ public final class RedisFairGrantLimiter implements FairGrantLimiter, AutoClosea
 
     private void evalRegister(String resource, String client) {
         try (Jedis jedis = jedisPool.getResource()) {
-            evalshaOrEval(jedis, ScriptKind.REGISTER, registerScript, 3,
+            evalshaOrEval(jedis, ScriptKind.REGISTER, registerScript, 4,
                     new String[]{
                             keys.bucket(resource),
                             keys.wait(resource),
-                            keys.pending(resource)
+                            keys.pending(resource),
+                            keys.window(resource)
                     },
                     new String[]{
                             client,
-                            Long.toString(config.getPendingTtlMs())
+                            Long.toString(config.getPendingTtlMs()),
+                            Long.toString(config.getEffectiveStateTtlMs())
                     });
         }
     }
