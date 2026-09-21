@@ -51,7 +51,7 @@ public class LocalShareFairGrantLimiterTest {
     }
 
     @Test
-    public void clearPendingResetsSlot() {
+    public void clearPendingPreservesCooldown() {
         FairGrantConfig config = FairGrantConfig.builder()
                 .ratePerSec(1D)
                 .writerNodes(1)
@@ -60,7 +60,7 @@ public class LocalShareFairGrantLimiterTest {
         assertTrue(limiter.tryAcquire("k", "m1").isGranted());
         assertFalse(limiter.tryAcquire("k", "m1").isGranted());
         limiter.clearPending("k", "m1");
-        assertTrue(limiter.tryAcquire("k", "m1").isGranted());
+        assertFalse(limiter.tryAcquire("k", "m1").isGranted());
     }
 
     @Test
@@ -72,6 +72,18 @@ public class LocalShareFairGrantLimiterTest {
         assertTrue(limiter.tryAcquire("k", "m1").isGranted());
     }
 
+    @Test public void monotonicClockControlsRefillAndReceiptLifetime() {
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(-5000000000L);
+        LocalShareFairGrantLimiter lim = new LocalShareFairGrantLimiter(
+                FairGrantConfig.builder().ratePerSec(1).writerNodes(1).permitTtlMs(2000).build(), clock::get);
+        assertTrue(lim.tryAcquireRequest("MyKey", "a", "r1").isGranted());
+        assertEquals("existing_permit", lim.tryAcquireRequest("mykey", "a", "r1").getDetail());
+        assertFalse(lim.tryAcquireRequest("mykey", "a", "r2").isGranted());
+        clock.addAndGet(1000000000L);
+        assertTrue(lim.tryAcquireRequest("mykey", "a", "r2").isGranted());
+        clock.addAndGet(1100000000L);
+        assertEquals("local_share", lim.tryAcquireRequest("mykey", "a", "r1").getDetail());
+    }
     @Test(expected = IllegalArgumentException.class)
     public void rejectsBlankClient() {
         FairGrantConfig config = FairGrantConfig.builder().build();

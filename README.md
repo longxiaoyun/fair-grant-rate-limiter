@@ -4,89 +4,35 @@ English | [中文](README.zh-CN.md)
 
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Java](https://img.shields.io/badge/Java-8%20%7C%2011%20%7C%2017-orange.svg)](#requirements)
 
-Many machines, one shared quota, and nobody gets stuck at the back of the line.
+A shared Redis token bucket for multiple JVMs, with FIFO turns among live waiting clients.
 
-This is a small Java library. It uses Redis and a Lua script to hand out permits for a shared limit, such as “this table may be committed 5 times per second”. All JVMs draw from the same bucket. When more than one machine is waiting, the one that has waited the longest gets the next permit.
+Use it when several writers share a resource quota, such as a table's submission rate. The library stores quota state, waiters and request receipts; it does not move business data or call cloud APIs.
 
-It does not move your data. It only answers two questions: is there a permit left, and whose turn is it.
+## Guarantees and boundaries
 
-## Contents
+- **Rate:** on the normal Redis path, an interval of `t` seconds admits approximately at most `burst + ratePerSec × t` new grants. This permits bursts; it is **not a strict N-per-sliding-second limiter**.
+- **Fairness:** waiting clients with live leases queue FIFO. A grant removes the client from the queue; its next request joins the tail. Fairness is per `clientId`, not per thread or request.
+- **Liveness:** retries or `registerPending` renew a waiting lease. The next acquire/register removes expired waiters, including crashed processes.
+- **Idempotency:** explicit request IDs prevent duplicate debits only within the `permitTtlMs` receipt lifetime. This does not provide exactly-once business execution.
+- **Failure:** the default is `DENY`. `LOCAL_SHARE` and `ALLOW` explicitly give up the strict shared quota guarantee.
 
-- [The problem](#the-problem)
-- [What it does and what it does not](#what-it-does-and-what-it-does-not)
-- [Compared with the usual options](#compared-with-the-usual-options)
-- [When to use it](#when-to-use-it)
-- [Requirements](#requirements)
-- [Install](#install)
-- [Usage](#usage)
-- [How a permit is chosen](#how-a-permit-is-chosen)
-- [Configuration](#configuration)
-- [If Redis is down](#if-redis-is-down)
-- [Layout](#layout)
-- [Build and test](#build-and-test)
-- [Limitations](#limitations)
-- [Contributing](#contributing)
-- [License](#license)
+Execute the protected action promptly after obtaining a grant. Accumulating grants and then issuing a batch of delayed actions can exceed the downstream action rate. If a cloud API call times out and you issue another call, acquire a new grant with a **new request ID**; the business idempotency key may remain unchanged.
 
-## The problem
+Redis state loss, asynchronous replication failover, independent Redis instances or mixed protocol versions can invalidate the shared quota. This is not a strongly consistent quota system under Redis failure.
 
-Cloud quotas are often per resource, not per machine. A table might allow 5 commits per second. If you have 35 writers, three common shortcuts all miss something:
+## Requirements and installation
 
-- Split the limit locally (`5 / 35` on each machine). You will not exceed the cloud limit, but idle machines waste their share, and every machine is slower than it needs to be.
-- Put one token bucket in Redis and let everyone race. The total stays under the limit, but the machine that calls most often keeps winning.
-- Take a distributed lock, then update a local counter. The lock stops two writers from updating at the same instant. It does not remember who has been waiting.
+- Java 8+; the default build produces Java 8 bytecode.
+- Redis 5+ with `TIME`, `EVAL` / `EVALSHA` permissions; Jedis 4.4.6.
+- An application-provided SLF4J implementation.
+- The factory accepts `JedisPool` for a single-node connection. There is no `JedisCluster` adapter.
 
-The missing piece is a shared counter plus a queue of who is still waiting.
-
-|  | Each machine limits itself (total ÷ machine count) | Everyone races for one bucket | Grab a lock first | **This library** |
-|--|--|--|--|--|
-| Can the machines together go over the cloud limit? | No, but spare quota on idle machines is wasted | No. One shared bucket | Not really guaranteed. A lock does not count uses | No. One shared bucket |
-| Does the busiest machine keep going first? | There is no race. Each machine only has its own slice | Yes. More calls, more wins | Yes. Whoever takes the lock goes first | No. Longest wait goes first |
-| Can a machine fail to submit for a long time? | Unlikely, but every machine is slowed down | Yes. A quiet caller can lose forever | Yes. The lock does not track wait time | No. A miss moves that machine forward |
-
-## What it does and what it does not
-
-It does:
-
-- Keep one token bucket per resource key, shared by every JVM that can reach the same Redis.
-- Pick the waiting client with the oldest “last granted” time.
-- Return immediately. `WAIT` means “try again later”, not “sleep here”.
-- Keep a short-lived permit so a retry of the same call does not spend a second token.
-- Fall back to a local limit if Redis cannot be reached.
-
-It does not:
-
-- Store payloads, rows, or commit bodies in Redis. Only counters, wait order, and a permit flag.
-- Replace a general traffic product such as Sentinel. Those products cap QPS. They do not decide which machine’s turn it is.
-- Partition Kafka or pin a table to one consumer. Fairness here is across clients that still have local work, not across message keys.
-- Talk to MaxCompute, ODPS, or any other cloud API. You call those yourself after a permit is granted.
-
-## When to use it
-
-Use it when several processes share one hard quota, and a chatty process must not crowd out the others. The original case is many writers committing to the same table under a per-table commit limit.
-
-Skip it when one process owns the quota, or when you only need a local `RateLimiter`. A Redis round trip is wasted in that case.
-
-## Requirements
-
-- JDK 8, 11, or 17. The default build target is Java 8, so a Java 11 or 17 runtime can still run the jar.
-- Redis 5 or newer. The scripts use `EVAL` / `EVALSHA`.
-- Jedis 4.4.6, pulled in by Maven.
-- An SLF4J binding in your application. The library only depends on `slf4j-api`.
-
-`mvn test` uses [jedis-mock](https://github.com/fppt/jedis-mock). You do not need a Redis server to run the tests.
-
-## Install
-
-The artifact is not on Maven Central yet. Build it from this repo:
+Not published to Maven Central yet. Install from this repository:
 
 ```bash
 mvn clean install
 ```
-
-Then depend on it:
 
 ```xml
 <dependency>
@@ -98,161 +44,151 @@ Then depend on it:
 
 ## Usage
 
-Create one limiter and share it. It is safe to call from many threads. `clientId` should stay the same for the life of the process, usually the host address. `resourceKey` is the thing the cloud quota applies to, usually `project:table`. Keys are stored in lower case, so `MyTable` and `mytable` are the same resource.
+Share one limiter per process. Use a stable, unique identity per process, such as a UUID created once at startup. An IP alone is insufficient when multiple JVMs share a host.
 
 ```java
 FairGrantConfig config = FairGrantConfig.builder()
     .keyPrefix("odps:fair:")
-    .ratePerSec(5.0)          // the cloud limit for this key
-    .burst(5.0)               // how many permits may pile up while idle
-    .permitTtlMs(20_000L)     // drop a permit if the caller dies mid-call
-    .writerNodes(35)          // only used when Redis is down
-    .fallbackMode(FairGrantConfig.FallbackMode.LOCAL_SHARE)
+    .ratePerSec(5.0)
+    .burst(5.0)
+    .pendingTtlMs(5_000L)
+    .permitTtlMs(20_000L)
+    .fallbackMode(FairGrantConfig.FallbackMode.DENY)
     .build();
 
 RedisFairGrantLimiter limiter = FairGrantLimiters.redis(jedisPool, config);
-String clientId = InetAddress.getLocalHost().getHostAddress();
+String clientId = UUID.randomUUID().toString(); // once per process
 String resourceKey = "my_project:my_table";
 
 AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
-if (result.getStatus() == AcquireResult.Status.GRANTED
-        || result.getStatus() == AcquireResult.Status.DEGRADED_LOCAL) {
-    try {
-        commitTable();
-    } finally {
-        limiter.invalidatePermit(resourceKey, clientId);
-    }
+if (result.isGranted()) {
+    commitTable();
 } else {
-    // WAIT or ERROR. Keep the batch local and retry after result.getRetryAfterMs().
+    // Keep the batch queued; schedule another attempt after result.getRetryAfterMs().
 }
+// Only when the entire process has no waiting work for this resource:
+// limiter.clearPending(resourceKey, clientId);
 ```
 
-There is a shortcut if you already split project and table:
+The convenience overload is `tryAcquire("my_project", "my_table", clientId)`. Resource names are trimmed and lowercased: `MyTable` and `mytable` share one quota. Do not use this naming convention for resources where case distinguishes identities.
+
+### New attempts and acquisition retries
+
+Each `tryAcquire` invocation requests **new quota**. Two concurrent threads using one client identity consume two tokens if both succeed.
+
+For retries after an ambiguous/lost Redis response, persist one request ID on the call-attempt object:
 
 ```java
-limiter.tryAcquire("my_project", "my_table", clientId);
+String requestId = UUID.randomUUID().toString(); // do not regenerate on Redis retry
+AcquireResult result = limiter.tryAcquireRequest(resourceKey, clientId, requestId);
 ```
 
-If you would rather not pass in a pool:
+- Distinct quota-counted business calls must use different request IDs.
+- Retry the same acquisition with the same ID. A retained receipt returns `GRANTED / existing_permit` without another debit.
+- Receipts expire `permitTtlMs` after the first grant; retries do not extend them. After expiration, the same ID can be charged again.
+- Set an acquisition retry deadline shorter than receipt retention. IDs are not permanent deduplication keys.
+- Do not independently execute one request ID from multiple threads. A replay means acquisition was granted, not that the business action remains unexecuted. The application owns execution deduplication.
+- No release is required. The deprecated `invalidatePermit` is a no-op. Receipts survive completion until TTL, so delayed cleanup cannot erase newer receipts.
 
-```java
-RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
-// limiter.close() also closes the pool it created
-```
+### Waiting and cancellation
 
-### Call it in this order
+1. Acquire automatically joins or renews a waiting lease. `registerPending` can join earlier.
+2. `WAIT` is non-blocking. Suggested retry intervals are at most half the waiting lease; low-rate clients must still renew regularly.
+3. A grant finishes the client's queue turn. In-flight business work does not retain the head position. Queue promptly for the next turn if more work remains.
+4. A client that misses its lease rejoins at the tail. Long GC pauses, scheduling delays and network stalls can lose its position.
+5. `clearPending` cancels waiting, without refunding tokens, deleting receipts or resetting local cooldown.
+6. With threads sharing an identity, a central queue owner must decide when the client is idle. One thread must not clear another thread's pending work.
 
-1. While this process still has work for the key, call `tryAcquire`. That also registers the client as waiting. You can call `registerPending` earlier if you want a place in line before the first try.
-2. On `GRANTED`, do the limited call, then `invalidatePermit`. Do this on failure too, or the permit sits until `permitTtlMs`.
-3. When the local queue for that key is empty, call `clearPending`. If you forget, this client stays in the line and can block machines that actually have work.
-4. On `WAIT`, do not sleep on the worker thread. Put the batch back and retry after `getRetryAfterMs()`.
+Redis failures in `registerPending` / `clearPending` are logged; leases eventually remove abandoned entries. These methods are not business transactions.
 
-A granted permit is idempotent until you invalidate it or it expires. If the process retries `tryAcquire` after a network blip and the permit is still there, Redis returns `existing_permit` and does not spend another token.
+| Status | `isGranted()` | Meaning |
+|---|---|---|
+| `GRANTED` | true | New Redis grant or same-request receipt |
+| `WAIT` | false | No token, another waiter, deny fallback or exhausted local share |
+| `DEGRADED_LOCAL` | true | The selected fallback allows execution; retry delay is zero |
+| `ERROR` | false | Conflicting configuration, Redis data/script error or unexpected result |
 
-### What the result means
+## Design
 
-| Status | Go ahead? | What to do |
-|--------|-----------|------------|
-| `GRANTED` | Yes | Run the call, then `invalidatePermit` |
-| `WAIT` | No | Retry after `getRetryAfterMs()`. `getDetail()` says why: `no_token`, or `not_selected:<clientId>` |
-| `DEGRADED_LOCAL` | Yes, under the fallback rules | Redis failed and the configured fallback allowed this call. Check `getRetryAfterMs()` as well: if it is greater than 0, the local slice for this interval is already used |
-| `ERROR` | No | Unexpected result. Back off and retry |
+One Lua invocation atomically:
 
-`isGranted()` is true for both `GRANTED` and `DEGRADED_LOCAL`. If you care about the Redis-down case, read `getStatus()` too.
+1. Checks the existing bucket's rate and burst against the caller's configuration.
+2. Returns an existing request receipt if present.
+3. Removes expired leases using Redis time, assigns a new waiter an increasing FIFO sequence and renews its lease.
+4. Refills using Redis time. Bucket timestamps never decrease, preventing repeated refill during a server clock rollback.
+5. If a token is available and this client is first, debits one, writes a request receipt and removes the client's waiting turn.
 
-## How a permit is chosen
+Sequence scores avoid client-ID tie breaking when registrations/grants share a millisecond. Head selection uses `ZRANGE 0 0`; stale leases are cleaned lazily on acquire/register.
 
-Each resource has four Redis keys. The default prefix is `fair:grant:`.
+The versioned key base is `{prefix}v2:{<base64url(resource)>}:`, where angle brackets are placeholders and the resource hash-tag braces are literal:
 
-| Key | Type | What it holds |
-|-----|------|----------------|
-| `{prefix}{resource}:bucket` | hash | `tokens` and `ts`, the shared bucket |
-| `{prefix}{resource}:wait` | sorted set | one entry per client, score is the last time that client was granted |
-| `{prefix}{resource}:pending` | set | clients that still have local work |
-| `{prefix}{resource}:permit:{clientId}` | string | set while that client is allowed to run, with a millisecond TTL |
+| Suffix | Type | Contents |
+|---|---|---|
+| `bucket` | hash | `tokens`, `ts`, `seq`, `rate`, `burst` |
+| `wait` | zset | clientId → FIFO sequence |
+| `pending` | zset | clientId → lease expiry time |
+| `permit:<base64url(client)>:<base64url(request)>` | string + TTL | Redis grant time in milliseconds |
 
-`tryAcquire` runs `src/main/resources/lua/fair_grant.lua` in one Redis call:
+Encoding is UTF-8, URL-safe Base64 without padding, preventing separator collisions between identities. With the default prefix, a resource's keys share a hash tag; this does not add Redis Cluster support to the Java client.
 
-1. Make sure this client is in `pending`. If it has never been granted, its wait score is “now”, so older waiters stay ahead.
-2. Refill the bucket: `min(burst, tokens + rate * seconds since last refill)`.
-3. If there is less than 1 token, return `WAIT` and how long to wait for the next token.
-4. Otherwise walk the wait set from the oldest score and pick the first client that is still pending. Clients that left the pending set are removed.
-5. If this caller is that client, subtract one token, set the permit, and move its wait score to now.
-6. If someone else was picked, return `WAIT` with `not_selected:<that client>`. No token is spent.
-
-So a machine that just won goes to the back. A machine that has not won stays near the front. That is the whole fairness rule.
+Buckets retain rate history and do not expire automatically. Local fallback retains per-resource state too. Plan lifecycle cleanup for high-cardinality, one-off resources. Do not delete live buckets or cooldown state: deletion restores the initial burst. Stale waiters on idle resources are removed on the next access.
 
 ## Configuration
 
 | Option | Default | Meaning |
-|--------|---------|---------|
-| `keyPrefix` | `fair:grant:` | Namespace, so several apps can share one Redis |
-| `ratePerSec` | `5` | Tokens added per second, shared by all clients of this key |
-| `burst` | same as `ratePerSec` | Cap on stored tokens. A long idle period cannot dump a huge burst later |
-| `permitTtlMs` | `20000` | Safety timer. If a process dies after `GRANTED` and never invalidates, the permit disappears and others can proceed |
-| `writerNodes` | `10` | Used only by `LOCAL_SHARE`. It is your estimate of how many writers exist, not something Redis discovers |
-| `fallbackMode` | `LOCAL_SHARE` | What to do when Redis throws |
-| `redisTimeoutMs` | `200` | Socket timeout for `FairGrantLimiters.redis(host, port, config)`, and the retry hint used by `DENY` |
+|---|---|---|
+| `keyPrefix` | `fair:grant:` | Application namespace |
+| `ratePerSec` | 5 | Finite positive shared average rate |
+| `burst` | `max(1, ratePerSec)` | Finite capacity of at least one token |
+| `pendingTtlMs` | 5000 | Waiting lease; allow for normal scheduling, Redis latency and GC |
+| `permitTtlMs` | 20000 | Request receipt retention, not a business lock timeout |
+| `fallbackMode` | `DENY` | Redis failure behavior |
+| `writerNodes` | 10 | Estimated process count for LOCAL_SHARE only |
+| `redisTimeoutMs` | 200 | Factory connection/pool timeout and DENY retry hint |
 
-Set `ratePerSec` to the cloud limit for that key, not to `cloud limit / machine count`. The division is only for the Redis-down fallback.
+All JVMs for one resource must agree on rate and burst, otherwise `ERROR / config_mismatch` is returned. To change either value, first stop and drain the resource's callers and coordinate a bucket reset. Mixed configurations are not a dynamic configuration protocol.
 
-## If Redis is down
+### Redis failure
 
-| Mode | What the caller sees |
-|------|----------------------|
-| `LOCAL_SHARE` | This process allows about `ratePerSec / writerNodes`. The result status is `DEGRADED_LOCAL`. This can still exceed the cloud limit if every machine falls back at once, because each one only knows its own slice |
-| `DENY` | Always `WAIT`. Nothing is submitted until Redis is back. Safe for a hard quota, and it can stall writers |
-| `ALLOW` | Always grants. Do not use this when going over the cloud limit is expensive |
+| Mode | Behavior |
+|---|---|
+| `DENY` | Default; return WAIT |
+| `LOCAL_SHARE` | Per-limiter rate of `ratePerSec / writerNodes`; local rejection remains WAIT |
+| `ALLOW` | Allow everything; only for callers explicitly accepting overrun |
 
-`clearPending` still clears the local fallback slot for that key, even if the Redis call fails.
+LOCAL_SHARE uses `System.nanoTime()` and atomic per-resource state; clearing pending does not reset cooldown. Multiple limiter instances in one process each receive their own local share. Partial Redis outages, transitions, underestimated process counts and simultaneous first fallback grants can violate the shared rate. Redis and local idempotency records are separate; cross-mode retries have no unified deduplication guarantee.
 
-## Layout
+Redis data/script errors such as WRONGTYPE or ACL rejection return ERROR instead of being hidden by ALLOW. Scripts use EVALSHA with EVAL recovery after cache loss. A successful grant does not depend on a subsequent SCRIPT LOAD operation.
 
-```
-src/main/java/io/github/longxiaoyun/fairgrant
-├── FairGrantLimiter.java            API
-├── RedisFairGrantLimiter.java       Redis + Lua
-├── LocalShareFairGrantLimiter.java  in-process fallback
-├── FairGrantConfig.java
-├── AcquireResult.java
-└── FairGrantLimiters.java           factories
+## Migrating from the old SNAPSHOT
 
-src/main/resources/lua
-├── fair_grant.lua
-├── register_pending.lua
-└── clear_pending.lua
-```
+This is a behavioral correction with a new Redis protocol. **Do not mix old and new clients**: old keys and `v2` keys are independent buckets and can both issue quota.
 
-## Build and test
+1. Stop old acquisitions and drain already-granted business actions.
+2. Allow the old bucket to refill (conservatively `burst / ratePerSec` seconds); ensure old actions/retries cannot resume later.
+3. Switch all clients together. Ordinary tryAcquire now debits each successful call; migrate acquisition retries to tryAcquireRequest.
+4. Remove invalidatePermit calls. Use clearPending only to cancel remaining waiting work.
+5. Choose fallback explicitly; the default changed from LOCAL_SHARE to DENY.
+6. Remove old Redis keys only after confirming no old clients remain. The library does not delete old data.
+
+## Build and end-to-end validation
 
 ```bash
-mvn clean test
-mvn -Pjdk8  clean test
-mvn -Pjdk11 clean test
-mvn -Pjdk17 clean test
+mvn clean test                      # unit tests + jedis-mock contract regressions
+mvn -Preal-redis clean verify        # plus isolated Redis and multi-JVM HTTP E2E
+mvn -Preal-redis -Dredis.server=/absolute/path/redis-server clean verify
 ```
 
-The suite covers config and key formatting, the local fallback, grant and rotation against embedded Redis, a check that one client cannot win every round, a concurrent burst cap, and the three Redis-down modes.
+Real tests require a local `redis-server` executable and loopback-port permissions. They allocate ports, start isolated instances with persistence disabled, and stop them on teardown; they do not use an existing Redis. Missing prerequisites fail tests rather than silently skipping them. Logs are in `target/redis-it-*` and `target/worker-*`.
 
-GitHub Actions runs the same tests on Temurin 8, 11, and 17.
+The E2E case starts four JVMs sharing rate=20/burst=2, performs 40 distinct HTTP commits and 40 acquisition receipt replays, verifies ten completions per client and initial FIFO fairness, and checks the token envelope for every interval between grant timestamps.
 
-## Limitations
+Real Redis coverage includes shutdown/recovery, all fallback modes, expired waiters, same-client concurrency, lost-response retry, SCRIPT FLUSH, timestamp rollback protection, fractional rates, mismatched configuration and script errors. CI runs Java 8/11/17, with separate Redis 5 and 7 coverage.
 
-- Fairness is only among clients that are still pending. A client that never calls, or that called `clearPending`, is not in line.
-- `clientId` must be stable. If it changes every call, that process looks like a new waiter and can cut in.
-- All writers must see the same Redis. Two Redis instances means two buckets.
-- The Lua script is the critical section. Do not wrap `tryAcquire` in your own distributed lock. That brings back the “whoever grabs the lock goes first” problem.
-- Clock skew between machines does not decide the order. Wait scores are written from the time each caller passes in, and Redis `TIME` is only a fallback inside the script. Large clock jumps on one machine can still skew its own score.
-- This is a personal project under `io.github.longxiaoyun`. It is not an Alibaba product.
+The `jdk8` / `jdk11` / `jdk17` compatibility profiles remain available. Higher-version profiles produce their respective bytecode versions; use the default build or jdk8 for a Java 8-compatible release artifact.
 
-## Contributing
+## Contributing and license
 
-Issues and pull requests are welcome.
+Keep source compatible with Java 8. Add regression tests for grant behavior and run `mvn -Preal-redis clean verify` before proposing changes.
 
-- Keep the source compatible with Java 8 unless we agree otherwise.
-- If you change grant behavior, add or adjust a test.
-- Run `mvn clean test` before opening a PR.
-
-## License
-
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE). A personal project, not an Alibaba product.

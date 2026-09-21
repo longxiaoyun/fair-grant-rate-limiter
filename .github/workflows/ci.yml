@@ -8,19 +8,42 @@ on:
 
 jobs:
   test:
-    name: JDK ${{ matrix.java }}
+    name: Java ${{ matrix.java }} / Redis ${{ matrix.redis }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         java: [ '8', '11', '17' ]
+        redis: [ '7.2.7' ]
+        include:
+          - java: '8'
+            redis: '5.0.14'
     steps:
       - uses: actions/checkout@v4
-      - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
           cache: maven
-      - name: Run tests
-        run: mvn -B -Pjdk${{ matrix.java }} clean test
+      - name: Build isolated Redis test executable
+        env:
+          REDIS_TEST_VERSION: ${{ matrix.redis }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/redis-test"
+          cd "$RUNNER_TEMP/redis-test"
+          curl --fail --location --retry 3 "https://download.redis.io/releases/redis-${REDIS_TEST_VERSION}.tar.gz" -o redis.tar.gz
+          tar -xzf redis.tar.gz
+          cd "redis-${REDIS_TEST_VERSION}"
+          make -j2 MALLOC=libc redis-server
+          echo "$PWD/src" >> "$GITHUB_PATH"
+      - name: Unit, Redis integration and multi-JVM HTTP tests
+        run: mvn -B -Pjdk${{ matrix.java }},real-redis clean verify
+      - name: Preserve verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-java-${{ matrix.java }}-redis-${{ matrix.redis }}
+          path: |
+            target/surefire-reports/
+            target/redis-it-*/redis.log
+            target/worker-*.log

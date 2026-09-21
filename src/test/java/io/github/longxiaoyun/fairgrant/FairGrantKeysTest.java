@@ -12,12 +12,19 @@ public class FairGrantKeysTest {
         FairGrantKeys keys = new FairGrantKeys("fg:");
         String resource = keys.resourceKey("MyProj", "MyTable");
         assertEquals("myproj:mytable", resource);
-        assertEquals("fg:myproj:mytable:bucket", keys.bucket(resource));
-        assertEquals("fg:myproj:mytable:wait", keys.wait(resource));
-        assertEquals("fg:myproj:mytable:pending", keys.pending(resource));
-        assertEquals("fg:myproj:mytable:permit:host-1", keys.permit(resource, "host-1"));
+        assertEquals("fg:v2:{bXlwcm9qOm15dGFibGU}:bucket", keys.bucket(resource));
+        assertEquals("fg:v2:{bXlwcm9qOm15dGFibGU}:wait", keys.wait(resource));
+        assertEquals("fg:v2:{bXlwcm9qOm15dGFibGU}:pending", keys.pending(resource));
+        assertEquals("fg:v2:{bXlwcm9qOm15dGFibGU}:permit:aG9zdC0x:cmVx", keys.permit(resource, "host-1", "req"));
     }
 
+    @Test public void identitiesCannotCollideAtSeparators() {
+        FairGrantKeys keys = new FairGrantKeys("fg:");
+        org.junit.Assert.assertNotEquals(keys.permit("a", "b:c", "d"), keys.permit("a", "b", "c:d"));
+    }
+    @Test(expected = IllegalArgumentException.class) public void rejectsEmptyTable() {
+        new FairGrantKeys("fg:").resourceKey("p", " ");
+    }
     @Test
     public void defaultPrefixWhenNull() {
         FairGrantKeys keys = new FairGrantKeys(null);

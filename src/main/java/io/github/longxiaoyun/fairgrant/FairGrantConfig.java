@@ -21,15 +21,17 @@ public final class FairGrantConfig {
     private final double burst;
     private final long permitTtlMs;
     private final int writerNodes;
+    private final long pendingTtlMs;
     private final FallbackMode fallbackMode;
     private final int redisTimeoutMs;
 
     private FairGrantConfig(Builder b) {
         this.keyPrefix = b.keyPrefix;
         this.ratePerSec = b.ratePerSec;
-        this.burst = b.burst > 0D ? b.burst : b.ratePerSec;
+        this.burst = b.burst > 0D ? b.burst : Math.max(1D, b.ratePerSec);
         this.permitTtlMs = b.permitTtlMs;
         this.writerNodes = b.writerNodes;
+        this.pendingTtlMs = b.pendingTtlMs;
         this.fallbackMode = b.fallbackMode;
         this.redisTimeoutMs = b.redisTimeoutMs;
     }
@@ -53,6 +55,9 @@ public final class FairGrantConfig {
     public long getPermitTtlMs() {
         return permitTtlMs;
     }
+
+    /** Waiting clients must retry or register before this lease expires. */
+    public long getPendingTtlMs() { return pendingTtlMs; }
 
     public int getWriterNodes() {
         return writerNodes;
@@ -81,7 +86,8 @@ public final class FairGrantConfig {
         private double burst = -1D;
         private long permitTtlMs = 20_000L;
         private int writerNodes = 10;
-        private FallbackMode fallbackMode = FallbackMode.LOCAL_SHARE;
+        private long pendingTtlMs = 5_000L;
+        private FallbackMode fallbackMode = FallbackMode.DENY;
         private int redisTimeoutMs = 200;
 
         public Builder keyPrefix(String keyPrefix) {
@@ -90,7 +96,7 @@ public final class FairGrantConfig {
         }
 
         public Builder ratePerSec(double ratePerSec) {
-            if (ratePerSec <= 0D) {
+            if (!Double.isFinite(ratePerSec) || ratePerSec <= 0D) {
                 throw new IllegalArgumentException("ratePerSec must be > 0");
             }
             this.ratePerSec = ratePerSec;
@@ -98,6 +104,9 @@ public final class FairGrantConfig {
         }
 
         public Builder burst(double burst) {
+            if (!Double.isFinite(burst) || burst < 1D) {
+                throw new IllegalArgumentException("burst must be finite and >= 1");
+            }
             this.burst = burst;
             return this;
         }
@@ -107,6 +116,12 @@ public final class FairGrantConfig {
                 throw new IllegalArgumentException("permitTtlMs must be > 0");
             }
             this.permitTtlMs = permitTtlMs;
+            return this;
+        }
+
+        public Builder pendingTtlMs(long pendingTtlMs) {
+            if (pendingTtlMs <= 0L) throw new IllegalArgumentException("pendingTtlMs must be > 0");
+            this.pendingTtlMs = pendingTtlMs;
             return this;
         }
 
@@ -132,7 +147,13 @@ public final class FairGrantConfig {
         }
 
         public FairGrantConfig build() {
-            return new FairGrantConfig(this);
+            FairGrantConfig config = new FairGrantConfig(this);
+            if (config.localShareIntervalMs() > Long.MAX_VALUE / 1_000_000L
+                    || permitTtlMs > Long.MAX_VALUE / 1_000_000L
+                    || pendingTtlMs > Long.MAX_VALUE / 1_000_000L) {
+                throw new IllegalArgumentException("interval/TTL is too large");
+            }
+            return config;
         }
     }
 }
