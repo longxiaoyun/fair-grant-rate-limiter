@@ -11,55 +11,78 @@
 
 ![10s 窗口里最多发放 6 个令牌，多台机器按顺序获取](docs/images/allocation.zh-CN.svg)
 
+## 选择接入方式
+
+`main` 同时维护两种接入方式，共用同一份核心实现，不需要切换分支。两个包使用相同的发布版本。
+
+| 项目类型 | 添加的依赖 | 接入文档 |
+|---|---|---|
+| Spring Boot（首页默认） | `fair-grant-spring-boot-starter`，自动引入核心库 | [Spring Boot](spring-boot-starter/README.zh-CN.md) |
+| 普通 Java / 非 Spring 项目 | `fair-grant-rate-limiter`，不引入 Spring | [普通 Java](docs/java-quickstart.zh-CN.md) |
+
 ## 先跑起来
 
-准备 Java 8+、Maven、Redis 5+ 和 Python 3.8+，然后在仓库根目录运行：
+准备 Java 17+、Maven、Redis 6+ 和 Python 3.8+，然后在仓库根目录运行 Spring Boot 示例：
 
 ```bash
-python3 examples/quickstart/run.py
+python3 examples/spring-boot/run.py
 ```
 
-脚本会构建库和独立示例项目，启动临时 Redis 和 **3 个 Java 进程**。三个进程各执行 4 次任务，共享 **10s／6 个令牌**的限制；你可以看到实际发放顺序和验证结果。结束后自动关闭测试服务，不使用已有 Redis。
+脚本启动临时 Redis 和 **3 个 Spring Boot 进程**，每个进程执行 3 次 HTTP 操作，验证公平分发和 **2s 窗口里最多发放 4 个令牌**。结束后自动关闭测试服务。
 
-[示例源码与更多场景](examples/quickstart/README.md) · [30 个进程、业务失败重试等验证](examples/quickstart/README.md#场景测试)
+[Spring Boot 示例](examples/spring-boot/README.md) · [普通 Java 示例（Java 8+）](examples/quickstart/README.md)
 
-## 接到自己的代码里
+## Spring Boot 接入
 
-先执行 `mvn install -DskipTests`，再添加依赖（暂未发布到 Maven Central）：
+添加 starter，在 YAML 中配置额度，再注入即可；连接池和关闭清理由 Spring 管理。
+
+尚未发布到 Maven Central，先在仓库根目录安装：
+```bash
+mvn install -DskipTests
+mvn -f spring-boot-starter/pom.xml install -DskipTests
+```
 
 ```xml
 <dependency>
   <groupId>io.github.longxiaoyun</groupId>
-  <artifactId>fair-grant-rate-limiter</artifactId>
+  <artifactId>fair-grant-spring-boot-starter</artifactId>
   <version>1.0.0-SNAPSHOT</version>
 </dependency>
 ```
 
-```java
-import io.github.longxiaoyun.fairgrant.*;
-
-FairGrantConfig config = FairGrantConfig.builder()
-    .ratePerSec(0.5).burst(1)
-    .slidingWindow(10_000L, 6)
-    .build();
-
-// 每个进程创建一次，所有进程连接同一个 Redis。
-RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
-FairGrantExecutor executor = new FairGrantExecutor(limiter);
-
-AcquireResult result = executor.tryExecute("table-a", "node-a", () -> {
-    // 在这里执行一次已准备好的操作，例如提交一个批次。
-    System.out.println("执行任务");
-});
-
-if (!result.isGranted()) {
-    // WAIT：保留当前任务，按 result.getRetryAfterMs() 安排再次尝试。
-    // ERROR：保留任务并排查 result.getDetail()，不要执行任务。
-}
-// 应用退出时调用 limiter.close()。
+```yaml
+fair-grant:
+  rate-per-sec: 0.5
+  burst: 1
+  window: 10s
+  max-permits: 6
+  redis:
+    host: 127.0.0.1
+    port: 6379
 ```
 
-只需先记住两点：**共用额度的操作使用相同的 `resourceKey`**（例中 `table-a`）；**不同进程使用不同且稳定的 `clientId`**（例中 `node-a`）。业务调用失败后重试，也要重新申请令牌。
+```java
+import io.github.longxiaoyun.fairgrant.*;
+import io.github.longxiaoyun.fairgrant.springboot.FairGrantOperations;
+import org.springframework.stereotype.Service;
+
+@Service
+public class BatchWriter {
+    private final FairGrantOperations grants;
+
+    public BatchWriter(FairGrantOperations grants) { this.grants = grants; }
+
+    public AcquireResult submit(String table, FairGrantExecutor.Action commitBatch) throws Exception {
+        return grants.tryExecute(table, commitBatch);
+    }
+}
+```
+
+调用 `submit("table-a", () -> 提交已准备好的批次)`。返回 `WAIT` 时保留任务并按 `getRetryAfterMs()` 再试；`ERROR` 时保留任务并排查。starter 不自动重试业务。
+
+共用额度的操作使用相同表名／`resourceKey`。每个应用实例默认生成独立的 `clientId`，无需手写节点名称或调用 `close()`。
+
+[Spring Boot 完整示例与配置](spring-boot-starter/README.zh-CN.md) · [普通 Java 接入](docs/java-quickstart.zh-CN.md)
 
 ## 进一步阅读
 

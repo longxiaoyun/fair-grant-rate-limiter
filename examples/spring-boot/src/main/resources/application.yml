@@ -1,0 +1,15 @@
+spring:
+  main:
+    web-application-type: none
+    banner-mode: "off"
+logging:
+  level:
+    root: WARN
+fair-grant:
+  rate-per-sec: 2
+  burst: 1
+  window: 2s
+  max-permits: 4
+  redis:
+    host: 127.0.0.1
+    port: 6379
