@@ -5,11 +5,32 @@ English | [中文](README.zh-CN.md)
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**A Redis-backed Java library for distributed fair token-bucket allocation.**
+**Fair token-bucket allocation across machines within a time window and a fixed token budget.**
 
-Fair Grant Rate Limiter coordinates shared resource quotas across Java processes. Redis and Lua atomically maintain a token bucket, an optional rolling window, and a waiting queue to enforce a global grant rate and allocate tokens to waiting clients in FIFO order.
+Built with Java, Redis and Lua. Machines accessing the same resource share a token quota, acquire tokens in waiting order, and execute their own tasks when granted.
 
-It is designed for distributed batch writes, third-party API calls, and other workloads that require both **global rate limiting** and **fairness between clients**. Applications use `resourceKey` to define the scope of a shared quota and `clientId` to identify each participating client.
+## How it works
+
+For a resource limited to **75 new grants in any 15 seconds**, configure the token bucket and enable the strict rolling window:
+
+```mermaid
+flowchart TD
+    A["Machine A<br/>Ready task"] --> Q
+    B["Machine B<br/>Ready task"] --> Q
+    N["Machine … N<br/>Ready task"] --> Q
+
+    subgraph F["Fair Grant · One shared quota per resource"]
+        Q["Fair waiting queue<br/>Arrival order: A → B → … → N"]
+        T["Shared token bucket + strict rolling window<br/>All machines combined: at most 75 new grants in any 15 seconds"]
+        Q --> G["Queue head + available quota<br/>Grant one token"]
+        T --> G
+    end
+
+    G --> E["Granted machine executes its own task"]
+    E -. "Next task ready: rejoin the tail" .-> Q
+```
+
+When quota is unavailable, clients keep their position by retrying and renewing their lease at the suggested interval. A grant ends the current turn; new work rejoins the tail. Frequent polling cannot overtake existing waiters. Different resources have independent quotas and queues.
 
 ## Features
 
