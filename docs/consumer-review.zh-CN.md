@@ -20,6 +20,8 @@ python3 examples/quickstart/run.py --scenario all
 
 Java 21 的 `window` 场景还观测到 HTTP 峰值 76／15s，而发放区间的检查没有无法判定的边界组。这进一步说明：把获准时间的限制直接当成下游接收时间的保证不成立。
 
+默认 quick 起初使用 burst=6，CI 也观测到窗口边缘的 HTTP 到达超限，因此默认演示已改为 rate=0.5、burst=1、window=6/10s，并对 HTTP 窗口直接断言。压力配置仍保留为独立场景。
+
 采用 `rate=2.5、burst=1、window=3/1s` 的重试对照满足本地观察的 HTTP 窗口；30 节点场景采用 `rate=4.8、burst=1、window=75/15s`。速率余量需要按实际环境选择，不能据本地通过就承诺任意网络延迟下的服务端窗口。
 
 ## 已落地的接入改进
@@ -45,4 +47,4 @@ Java 21 的 `window` 场景还观测到 HTTP 峰值 76／15s，而发放区间�
 
 `target/latest-report.json` 保存最新汇总；每个 `target/run-*` 目录保存实际 HTTP 事件、每个 JVM 的日志与逐次获取区间。
 
-`uncertain_boundary_groups` 不为零表示公共接口测量无法确定该边界，应结合精确 Lua 合约测试理解。`observed_http_window_pass=false` 表示下游到达窗口实测超限。压力场景允许报告 WARN；留余量的 `fleet` 和 `retry-paced` 场景若 HTTP 窗口超限，则测试直接失败。
+`uncertain_boundary_groups` 不为零表示公共接口测量无法确定该边界，应结合精确 Lua 合约测试理解。`observed_http_window_pass=false` 表示下游到达窗口实测超限。压力场景允许报告 WARN；留余量的 `quick`、`fleet` 和 `retry-paced` 场景若 HTTP 窗口超限，则测试直接失败。
