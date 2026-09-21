@@ -23,7 +23,9 @@ public final class FairGrantLimiters {
         poolConfig.setMaxTotal(32);
         poolConfig.setMaxIdle(8);
         poolConfig.setMinIdle(1);
-        poolConfig.setTestOnBorrow(true);
+        poolConfig.setTestOnBorrow(config.isRedisTestOnBorrow());
+        poolConfig.setTestWhileIdle(true);
+        poolConfig.setTimeBetweenEvictionRunsMillis(30_000L);
         poolConfig.setMaxWaitMillis(config.getRedisTimeoutMs());
         JedisPool pool = new JedisPool(poolConfig, host, port, config.getRedisTimeoutMs());
         return new RedisFairGrantLimiter(pool, config, true);

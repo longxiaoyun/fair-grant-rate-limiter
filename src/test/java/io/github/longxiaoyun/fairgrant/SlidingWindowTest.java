@@ -27,12 +27,12 @@ public class SlidingWindowTest {
                                long windowMs, int count, long leaseMs) {
         long now = epoch + offsetUs;
         String script = LuaScriptLoader.load("lua/fair_grant.lua")
-                .replace("local t = redis.call('TIME')", "local t = {ARGV[8], ARGV[9]}");
+                .replace("local t = redis.call('TIME')", "local t = {ARGV[9], ARGV[10]}");
         try (Jedis j = pool.getResource()) {
             return (List<Object>) j.eval(script, 5, keys.bucket("k"), keys.wait("k"), keys.pending("k"),
                     keys.permit("k", client, request), keys.window("k"), client,
                     Double.toString(rate), Double.toString(burst), "20000", Long.toString(leaseMs),
-                    Long.toString(windowMs), Integer.toString(count),
+                    Long.toString(windowMs), Integer.toString(count), "60001",
                     Long.toString(now / 1000000), Long.toString(now % 1000000));
         }
     }

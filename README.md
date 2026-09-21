@@ -66,7 +66,7 @@ Use the same **resourceKey** for operations sharing quota (`table-a` above), and
 - [Runnable standalone project](examples/quickstart/README.md): waiting, retries and multiple resources.
 - [Kafka → ODPS integration](docs/kafka-odps.en.md): batching and commits across thirty nodes.
 - [Configuration and guarantees](docs/reference.md): queues, windows, receipts and Redis failures.
-- [Migration](docs/reference.md#migrating-from-the-old-snapshot): v3 must not run alongside older protocols.
+- [Migration](docs/reference.md#migrating-from-the-old-snapshot): v4 must not run alongside older protocols.
 
 The strict window governs grant timestamps. Execute immediately after acquisition and account for SDK-internal retries. Redis failure pauses grants by default.
 

@@ -16,6 +16,8 @@ Start with the README to run the standalone example. Use this page to look up co
 | `permitTtlMs` | 20000 | Request receipt retention, not a business lock timeout |
 | `fallbackMode` | `DENY` | Redis failure behavior |
 | `writerNodes` | 10 | Estimated process count for LOCAL_SHARE only |
+| `stateIdleTtlMs` | 60000 | Minimum idle retention; safety horizons may extend it |
+| `redisTestOnBorrow` | false | Owned pool borrow validation; idle validation stays enabled |
 | `redisTimeoutMs` | 200 | Factory connection/pool timeout and DENY retry hint |
 
 All JVMs for one resource must agree on rate, burst, window duration and count, otherwise `ERROR / config_mismatch` is returned. To change these values, first stop and drain the resource's callers and coordinate a bucket reset. Mixed configurations are not a dynamic configuration protocol.
@@ -103,11 +105,11 @@ One Lua invocation atomically:
 
 Sequence scores avoid client-ID tie breaking when registrations/grants share a millisecond. Head selection uses `ZRANGE 0 0`; stale leases are cleaned lazily on acquire/register.
 
-The versioned key base is `{prefix}v3:{<base64url(resource)>}:`, where angle brackets are placeholders and the resource hash-tag braces are literal:
+The versioned key base is `{prefix}v4:{<base64url(resource)>}:`, where angle brackets are placeholders and the resource hash-tag braces are literal:
 
 | Suffix | Type | Contents |
 |---|---|---|
-| `bucket` | hash | `tokens`, `tsUs`, `clockUs`, `seq`, `rate`, `burst`, `windowMs`, `windowMaxPermits`, `grantSeq` |
+| `bucket` | hash | `tokens`, `tsUs`, `clockUs`, `seq`, `rate`, `burst`, `windowMs`, `windowMaxPermits`, `grantSeq`, `retentionMs` |
 | `window` | zset | Unique grant sequence → Redis microsecond timestamp; at most maxPermits records |
 | `wait` | zset | clientId → FIFO sequence |
 | `pending` | zset | clientId → lease expiry time |
@@ -115,11 +117,19 @@ The versioned key base is `{prefix}v3:{<base64url(resource)>}:`, where angle bra
 
 Encoding is UTF-8, URL-safe Base64 without padding, preventing separator collisions between identities. With the default prefix, a resource's keys share a hash tag; this does not add Redis Cluster support to the Java client.
 
-Buckets retain rate history and do not expire automatically. Local fallback retains per-resource state too. Plan lifecycle cleanup for high-cardinality, one-off resources. Do not delete live buckets or cooldown state: deletion restores the initial burst. Stale waiters on idle resources are removed on the next access.
+Redis state expires after safe inactivity. Retention is `max(stateIdleTtlMs, ceil(burst / ratePerSec * 1000), windowMs, permitTtlMs, pendingTtlMs) + 1` milliseconds. The idle minimum defaults to 60 seconds. Acquire/register renew the bucket, window and queues together; each live bucket preserves the longest safety horizon used by any client. Clock rollback extends retention. At expiration the bucket would be full, window history and leases exhausted, and receipts expired, so recreation cannot restore quota early. Receipt replays do not extend receipt validity. Very low rates or large bursts can require substantially longer retention. Local fallback state is separate from this Redis cleanup.
+
+### Retry hints, connections and timeouts
+
+When quota is available but another client heads the queue, retry hints adapt to the effective configured rate between 1 and 50ms, bounded by lease renewal. Empty token buckets and full windows still return the corresponding budget wait. Honor `retryAfterMs` rather than spinning.
+
+The owned pool defaults to no borrow-time PING and validates idle connections every 30 seconds. Jedis discards broken connections after failure; DENY still applies and the library does not automatically replay potentially debited acquisitions. Use `.redisTestOnBorrow(true)` to opt back into borrow validation. External pools remain caller-managed.
+
+`redisTimeoutMs` applies separately to connection establishment, socket reads and pool borrowing; it is **not an end-to-end deadline**. Removing redundant PING reduces work and timeout stacking, but pool contention, connection setup and script-cache recovery can still exceed that duration in total. No background acquisition is launched to simulate a hard deadline; preserve the request ID when a result is ambiguous and follow the receipt rules.
 
 ## Migrating from the old SNAPSHOT
 
-This is a behavioral correction with a new Redis protocol. **Do not mix old and new clients**: old keys (including v2) and `v3` keys are independent buckets and can both issue quota.
+This is a behavioral correction with a new Redis protocol. **Do not mix old and new clients**: old keys (including v2/v3) and `v4` keys are independent buckets and can both issue quota.
 
 1. Stop old acquisitions and drain already-granted business actions.
 2. Allow the old bucket to refill (conservatively `max(burst / ratePerSec, old/new window duration)` seconds); ensure old actions/retries cannot resume later.

@@ -12,10 +12,10 @@ public class FairGrantKeysTest {
         FairGrantKeys keys = new FairGrantKeys("fg:");
         String resource = keys.resourceKey("MyProj", "MyTable");
         assertEquals("myproj:mytable", resource);
-        assertEquals("fg:v3:{bXlwcm9qOm15dGFibGU}:bucket", keys.bucket(resource));
-        assertEquals("fg:v3:{bXlwcm9qOm15dGFibGU}:wait", keys.wait(resource));
-        assertEquals("fg:v3:{bXlwcm9qOm15dGFibGU}:pending", keys.pending(resource));
-        assertEquals("fg:v3:{bXlwcm9qOm15dGFibGU}:permit:aG9zdC0x:cmVx", keys.permit(resource, "host-1", "req"));
+        assertEquals("fg:v4:{bXlwcm9qOm15dGFibGU}:bucket", keys.bucket(resource));
+        assertEquals("fg:v4:{bXlwcm9qOm15dGFibGU}:wait", keys.wait(resource));
+        assertEquals("fg:v4:{bXlwcm9qOm15dGFibGU}:pending", keys.pending(resource));
+        assertEquals("fg:v4:{bXlwcm9qOm15dGFibGU}:permit:aG9zdC0x:cmVx", keys.permit(resource, "host-1", "req"));
     }
 
     @Test public void identitiesCannotCollideAtSeparators() {

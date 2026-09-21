@@ -16,6 +16,8 @@
 | `permitTtlMs` | 20000 | 请求回执保留期；不是业务锁超时 |
 | `fallbackMode` | `DENY` | Redis 不可用时的策略 |
 | `writerNodes` | 10 | 仅用于 LOCAL_SHARE 的估计进程数 |
+| `stateIdleTtlMs` | 60000 | 最短闲置保留期；安全期限可能使其延长 |
+| `redisTestOnBorrow` | false | 工厂连接池借出校验；空闲校验始终开启 |
 | `redisTimeoutMs` | 200 | 工厂连接池超时及 DENY 建议重试间隔 |
 
 同一资源的所有 JVM 必须使用相同 rate、burst、窗口时长和次数，否则返回 `ERROR / config_mismatch`。修改这些参数需先停止并排空该资源的调用，再协调重建桶；不能靠混用不同配置动态修改。
@@ -108,11 +110,11 @@ Redis 时钟大幅向前跳变会提前结束真实时间的等待窗口；Redis
 
 队列使用序号而非毫秒时间作分数，同一毫秒内不会按 clientId 字典序反复选同一个客户端。取队首使用 `ZRANGE 0 0`；过期成员在后续获取/登记时惰性清理。
 
-版本化 Redis key 的基础部分为 `{prefix}v3:{<base64url(resource)>}:`（尖括号是占位符，花括号是 key 的实际字符）：
+版本化 Redis key 的基础部分为 `{prefix}v4:{<base64url(resource)>}:`（尖括号是占位符，花括号是 key 的实际字符）：
 
 | 后缀 | 类型 | 内容 |
 |---|---|---|
-| `bucket` | hash | `tokens`、`tsUs`、`clockUs`、`seq`、`rate`、`burst`、`windowMs`、`windowMaxPermits`、`grantSeq` |
+| `bucket` | hash | `tokens`、`tsUs`、`clockUs`、`seq`、`rate`、`burst`、`windowMs`、`windowMaxPermits`、`grantSeq`、`retentionMs` |
 | `window` | zset | 发放序号 → Redis 微秒时间；只在启用窗口时创建，记录数最多为窗口次数上限 |
 | `wait` | zset | clientId → FIFO 序号 |
 | `pending` | zset | clientId → 等待租约过期微秒时间 |
@@ -120,11 +122,19 @@ Redis 时钟大幅向前跳变会提前结束真实时间的等待窗口；Redis
 
 编码使用 UTF-8、URL 安全 Base64、不带 padding，避免 client/request 中的分隔符造成 key 碰撞。默认前缀下，同一资源 key 具有相同 hash tag；这不意味着当前 Java 客户端已支持 Redis Cluster。
 
-桶保留速率历史，不自动过期；本地 fallback 也按资源保留状态。高基数、一次性资源需要应用规划清理生命周期。不能在客户端仍会重试或冷却尚未结束时随意删桶；删除会重置初始突发额度。闲置资源的过期等待成员会在下一次访问时清理。
+Redis 状态在安全闲置后自动过期。保留时间为 `max(stateIdleTtlMs, ceil(burst / ratePerSec × 1000), windowMs, permitTtlMs, pendingTtlMs) + 1` 毫秒；`stateIdleTtlMs` 默认 60 秒。获取和登记会一起续期桶、窗口与队列；同一个活跃桶保留客户端曾使用的最长安全期限，时钟回拨时额外延长。这保证回收时令牌已补满、窗口记录和租约已失效、回执已过期，重新创建不会提前发额度。回执重放不延长其自身有效期。低速率、大 burst 会使安全保留期显著长于 60 秒；本地 fallback 的状态管理不在此 Redis 回收机制内。
+
+### 重试、连接池与超时
+
+令牌与窗口有余量、但当前客户端不是队首时，重试提示根据有效速率自适应到 1–50ms，并受租约心跳限制。窗口耗尽或缺令牌仍按实际等待时间重试。业务应遵循 `retryAfterMs`，不要无间隔循环。
+
+工厂创建的连接池默认关闭每次借出的 PING，启用每 30 秒一次的空闲连接校验。坏连接在实际操作失败后由 Jedis 丢弃；故障仍按 DENY 处理，不自动重试可能已扣费的申请。需要借出校验时配置 `.redisTestOnBorrow(true)`；外部连接池由调用方自行管理。
+
+`redisTimeoutMs` 分别作用于连接、socket 读取和连接池借出等待，**不是一次获取的总 deadline**。取消重复 PING 减少了正常开销与故障时的超时叠加，但连接池拥塞、连接建立、SCRIPT FLUSH 后脚本重载仍可能使总耗时超过这个值。库不通过超时后继续后台执行的方式伪造硬截止时间；获取结果不确定时应保留请求 ID，按回执规则处理。
 
 ## 从旧 SNAPSHOT 升级
 
-这是一次有行为变化的修复，**不支持新旧客户端混跑**：旧版（含 v2）key 与 `v3` key 是两个独立桶，混跑会双重放行。
+这是一次有行为变化的修复，**不支持新旧客户端混跑**：旧版（含 v2/v3）key 与 `v4` key 是两个独立桶，混跑会双重放行。
 
 1. 停止旧客户端获取许可，排空已获准的业务请求。
 2. 等待旧桶恢复初始突发额度所需的时间（保守取 `max(burst / ratePerSec, 新旧窗口时长)` 秒），并确认旧请求不会继续执行或重试。
