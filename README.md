@@ -9,28 +9,13 @@ English | [中文](README.zh-CN.md)
 
 Built with Java, Redis and Lua. Machines accessing the same resource share a token quota, acquire tokens in waiting order, and execute their own tasks when granted.
 
-## How it works
+## How are tokens distributed?
 
-For a resource limited to **75 new grants in any 15 seconds**, configure the token bucket and enable the strict rolling window:
+This example uses a quota of six grants per resource in any ten seconds to show how three machines share tokens. Each token permits one operation; enable the window with `slidingWindow(10_000L, 6)`.
 
-```mermaid
-flowchart TD
-    A["Machine A<br/>Ready task"] --> Q
-    B["Machine B<br/>Ready task"] --> Q
-    N["Machine … N<br/>Ready task"] --> Q
+![Three machines share six tokens: ready clients take turns and idle clients reserve no quota](docs/images/allocation.en.svg)
 
-    subgraph F["Fair Grant · One shared quota per resource"]
-        Q["Fair waiting queue<br/>Arrival order: A → B → … → N"]
-        T["Shared token bucket + strict rolling window<br/>All machines combined: at most 75 new grants in any 15 seconds"]
-        Q --> G["Queue head + available quota<br/>Grant one token"]
-        T --> G
-    end
-
-    G --> E["Granted machine executes its own task"]
-    E -. "Next task ready: rejoin the tail" .-> Q
-```
-
-When quota is unavailable, clients keep their position by retrying and renewing their lease at the suggested interval. A grant ends the current turn; new work rejoins the tail. Frequent polling cannot overtake existing waiters. Different resources have independent quotas and queues.
+The figure shows grant order in two independent scenarios. Actual grant times also depend on token refill and task readiness. FIFO applies to waiting clients that keep retrying and renewing their leases.
 
 ## Features
 
