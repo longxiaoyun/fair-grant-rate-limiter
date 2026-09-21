@@ -5,11 +5,32 @@
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**基于 Redis 的 Java 分布式公平令牌桶库。**
+**公平令牌桶分发，解决在时间窗口里给多机器公平分发固定令牌的问题。**
 
-Fair Grant Rate Limiter 用于多个 Java 进程共享资源调用配额的场景。它通过 Redis 和 Lua 原子维护令牌桶、滑动窗口和等待队列，在控制全局令牌发放速率的同时，按 FIFO 顺序向等待中的客户端分发令牌。
+基于 Java、Redis 和 Lua 实现。同一资源的多台机器共享令牌配额，按等待顺序获取令牌，获准后执行各自的任务。
 
-适用于分布式批量写入、第三方 API 调用等需要同时满足**全局限流**与**客户端公平性**的场景。应用通过 `resourceKey` 定义配额的共享范围，通过 `clientId` 标识参与分发的客户端。
+## 工作原理
+
+以同一资源 **每 15 秒最多发放 75 个令牌** 为例，配置令牌桶并启用严格滑动窗口：
+
+```mermaid
+flowchart TD
+    A["机器 A<br/>任务已就绪"] --> Q
+    B["机器 B<br/>任务已就绪"] --> Q
+    N["机器 … N<br/>任务已就绪"] --> Q
+
+    subgraph F["Fair Grant · 同一资源共享一份配额"]
+        Q["公平等待队列<br/>按进入顺序：A → B → … → N"]
+        T["共享令牌桶 + 严格滑动窗口<br/>所有机器合计：任意 15 秒最多 75 个新令牌"]
+        Q --> G["轮到队首且有可用额度<br/>发放 1 个令牌"]
+        T --> G
+    end
+
+    G --> E["获准的机器执行自己的任务"]
+    E -. "下一项任务就绪后，重新加入队尾" .-> Q
+```
+
+没有可用额度时，节点保留等待位置并按建议间隔重试、续租；获准后退出本轮排队。有新任务的节点重新排到队尾，高频申请不会越过已有等待者。不同资源使用独立的配额和队列。
 
 ## 核心特性
 
