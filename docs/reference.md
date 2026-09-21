@@ -2,7 +2,7 @@
 
 [Back to the project introduction](../README.md) · [中文](reference.zh-CN.md)
 
-Start with the README for the business example and integration steps. Use this page to look up configuration, handle retries and failures, or migrate an older version.
+Start with the README for the business example and integration steps. Use this page to look up configuration, handle retries and failures, or migrate an older version. The README explains mixed-table Kafka consumption and local batching; the [scenario review (Chinese)](scenario-review.zh-CN.md) records the 75-per-15-second validation gap.
 
 ## Configuration
 
@@ -53,7 +53,7 @@ AcquireResult result = limiter.tryAcquireRequest(resourceKey, clientId, requestI
 
 ### Waiting and cancellation
 
-1. Acquire automatically joins or renews a waiting lease. `registerPending` can join earlier.
+1. Acquire automatically joins or renews a waiting lease. Use `registerPending` only for commit-ready batches, never merely because an unfinished local buffer contains some rows.
 2. `WAIT` is non-blocking. Suggested retry intervals are at most half the waiting lease; low-rate clients must still renew regularly.
 3. A grant finishes the client's queue turn. In-flight business work does not retain the head position. Queue promptly for the next turn if more work remains.
 4. A client that misses its lease rejoins at the tail. Long GC pauses, scheduling delays and network stalls can lose its position.
@@ -128,6 +128,8 @@ mvn -Preal-redis -Dredis.server=/absolute/path/redis-server clean verify
 Real tests require a local `redis-server` executable and loopback-port permissions. They allocate ports, start isolated instances with persistence disabled, and stop them on teardown; they do not use an existing Redis. Missing prerequisites fail tests rather than silently skipping them. Logs are in `target/redis-it-*` and `target/worker-*`.
 
 The E2E case starts four JVMs sharing rate=20/burst=2, performs 40 distinct HTTP commits and 40 acquisition receipt replays, verifies ten completions per client and initial FIFO fairness, and checks the token envelope for every interval between grant timestamps.
+
+The additional `MaxComputeScenarioIT` uses real Redis with 30 logical consumers and synthetic mixed-table messages. It checks independent local batches, FIFO tableA grants, independent tableB quota and a frequent applicant that cannot leapfrog waiting nodes. It does not start Kafka or call an ODPS SDK; the actual commit window and SDK retries still require pipeline validation.
 
 Real Redis coverage includes shutdown/recovery, all fallback modes, expired waiters, same-client concurrency, lost-response retry, SCRIPT FLUSH, timestamp rollback protection, fractional rates, mismatched configuration and script errors. CI runs Java 8/11/17, with separate Redis 5 and 7 coverage.
 

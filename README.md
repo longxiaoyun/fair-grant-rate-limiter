@@ -5,72 +5,121 @@ English | [中文](README.zh-CN.md)
 [![CI](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/longxiaoyun/fair-grant-rate-limiter/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**A Java rate limiter that lets multiple programs share one request rate and gives waiting programs their turns in order.**
+**A Java library for fair token-bucket distribution, built on Redis and Lua.**
 
-For example, three programs call a third-party API using the same account. You want them to make five calls per second on average **in total**, while giving every program with pending work a turn. Fair Grant runs before each API call and answers: “you may call now” or “try again later.”
+When multiple processes share a resource's call quota, it handles two concerns: **maintain the shared token bucket and distribute tokens in waiting order among clients with ready work.**
 
-Add it as a Maven dependency in each Java program and connect them to the same Redis. There is no separate Fair Grant service to deploy.
+The application defines the resource, the work and the operation performed after a grant. The library has no Kafka or ODPS SDK dependency and does not encode a cloud product's quota rules.
 
-## What problem does it solve?
+The Kafka → ODPS pipeline that motivated the project explains why a shared bucket alone is not enough and what fair distribution adds.
 
-Suppose three Java programs call the same **document recognition API**. Each call uploads one file and receives the recognition result. All three use the same third-party account.
+## Why this library exists
 
-| Program | Work | Files waiting for recognition |
+The project comes from a Kafka → ODPS (MaxCompute) ingestion pipeline.
+
+### One topic carries data for many tables
+
+Each Kafka message contains the destination ODPS table, its structure and the row data. Messages for different tables share a topic, for example:
+
+```json
+{"project":"demo","table":"tableA","tableSchema":[{"name":"id","type":"bigint"}],"data":{"id":101}}
+{"project":"demo","table":"tableB","tableSchema":[{"name":"event","type":"string"}],"data":{"event":"login"}}
+{"project":"demo","table":"tableA","tableSchema":[{"name":"id","type":"bigint"}],"data":{"id":102}}
+```
+
+This illustrates the information carried by messages; the library does not prescribe a message format.
+
+### Thirty consumers build their own per-table batches
+
+Suppose thirty nodes consume the topic. Each node groups rows by destination table in its own memory and prepares a batch when its application-defined size or age threshold is reached.
+
+Several nodes may receive rows for tableA, so several independent local batches can be ready to commit to the same table:
+
+| Node | Local tableA buffer | Local tableB buffer |
 |---|---|---|
-| A | Process a historical archive | 1,000 |
-| B | Process today's new files | 10 |
-| C | Process files just uploaded by users | 10 |
+| Node 1 | 6,000 rows, ready to commit | Still accumulating |
+| Node 2 | 8,000 rows, ready to commit | No data |
+| … | … | … |
+| Node 30 | 3,000 rows, ready to commit | Another batch ready |
 
-You set two requirements for this account:
+**Node 1's tableA batch is not merged with node 2's batch.** They share the destination table's commit quota because both are committed to the same ODPS table.
 
-1. **Control the combined rate:** A, B and C together should start five calls per second on average.
-2. **Give each program a turn:** A has much more work, but repeatedly asking for quota should not leave B and C waiting indefinitely.
+### The table has a shared commit limit
 
-Limiting calls inside each program alone does not meet both requirements:
+Alibaba Cloud's MaxCompute documentation lists **75 write Commit calls per table per 15 seconds**. This example commits through Tunnel `UploadSession.commit`. Commits to tableA from all thirty nodes count together; each node does not receive a separate allowance of 75. [Official Data Transmission Service limits](https://help.aliyun.com/zh/maxcompute/overview-of-dts)
 
-| Approach | What happens in this example? |
-|---|---|
-| Allow each program five calls per second | Together they could make fifteen calls per second, exceeding your combined target. |
-| Reserve one third of the quota for each program | After B and C finish, A still gets only its own share and the rest sits unused. |
-| Share a limiter that only deducts available quota | It can control the combined rate, but does not decide whose turn comes next; more frequent applicants may obtain more opportunities. |
+These are **Commit calls, not Kafka messages or data rows**. A batch of 6,000 rows that uses one Commit needs one token. TableB has its own quota.
 
-Fair Grant adds **a waiting order** to **the shared quota**.
+Two things must therefore work together:
 
-### What changes after integration?
+1. **Shared control per table:** every node committing tableA uses tableA's token bucket.
+2. **Fair distribution across nodes:** consumers with ready tableA batches take turns, rather than allowing the most frequent applicant to keep obtaining the tokens.
 
-Before each recognition call, A, B and C ask Fair Grant for permission to make one call. This permission is called a **permit**. One permit covers one API call, regardless of the file's size or page count.
+## Where does Fair Grant fit?
 
-Suppose all three have joined the queue in A, B, C order and keep queueing for their remaining work:
+```mermaid
+flowchart TD
+    K["One Kafka topic<br/>Messages for tableA, tableB, and other tables"]
+    K --> N1["Consumer node 1<br/>Local per-table buffers and batches"]
+    K --> N2["Consumer node 2<br/>Local per-table buffers and batches"]
+    K --> N30["Other nodes … 30<br/>Their own local batches"]
+    N1 --> F["Batch ready, immediately before Commit<br/>Call Fair Grant inside each node"]
+    N2 --> F
+    N30 --> F
+    F <--> R["Shared Redis<br/>tableA: token bucket + waiting queue<br/>tableB: independent bucket + queue"]
+    F -->|"Token granted"| C["Granted node commits its own local batch"]
+    C --> O["ODPS / MaxCompute<br/>Destination table"]
+    F -->|"WAIT"| W["Keep the batch on its original node<br/>Retry acquisition after the suggested delay"]
+```
 
-| Next available opportunity | Goes to | What happens next |
+Fair Grant is a library embedded in each Java process, not another service to deploy. Redis stores token and waiting state; consumers retain ownership of messages, table structures and batch data.
+
+**Acquire after a batch is ready and immediately before its actual Commit.** Do not acquire for each Kafka message or reserve a queue position for a batch that cannot yet commit.
+
+## How are tokens distributed fairly?
+
+Suppose nodes 1, 2 and 3 have ready tableA batches and join its waiting queue in that order:
+
+| Token | Recipient | Next action |
 |---|---|---|
-| 1 | A | A calls the API for one file. It has more work, so it rejoins the tail. |
-| 2 | B | B processes one file, then rejoins the tail. |
-| 3 | C | C processes one file, then rejoins the tail. |
-| 4 | A | A gets a turn for its next file. |
+| First | Node 1 | Commit its tableA batch; rejoin the tail when another batch is ready. |
+| Second | Node 2 | Commit its own tableA batch. |
+| Third | Node 3 | Commit its own tableA batch. |
+| Subsequent | The current ready waiter at the head | Continue in waiting order. |
 
-This illustrates queue order; each grant must also wait for quota to become available. Once B and C have no work left, they stop queueing. A can use the available quota without reserving two thirds for idle programs.
+If all thirty nodes continuously have ready batches and renew/retry normally, they take turns. At a smooth five tokens per second, a full round of thirty nodes would ideally take about six seconds; this is not a promise about commit completion time.
 
-The library does not process the files. On “granted,” **your program calls the third-party API**. On “wait,” the file stays in your program's own task queue and your program asks again later. The library does not wake tasks in the background.
+If only three nodes have ready batches, only those three participate. No quota is reserved for the other twenty-seven idle nodes. Waiting for tableA does not consume tableB's tokens.
 
-## When should I use it?
+Fairness is per **consumer node with a ready batch for the same destination table**, not weighted by Kafka partition, message count or batch row count.
 
-It fits when both of these apply:
+## General-purpose concepts behind the example
 
-- Multiple Java processes call the same limited target, such as an API account or a table's submission endpoint.
-- You want to control their combined request rate and let processes with pending work take turns.
+| Concept | Meaning | Kafka → ODPS example |
+|---|---|---|
+| `resourceKey` | Which operations share one quota | Complete destination table identity |
+| `clientId` | Which client receives a fair turn | Stable consumer process identity |
+| Ready work | An operation that can execute after a grant | A local batch prepared for commit |
+| One token | One opportunity to perform a controlled operation | One `UploadSession.commit` call attempt |
+| `ratePerSec` / `burst` | Refill rate and capacity for the resource | Settings derived from the table's commit quota |
 
-It counts **calls**, not concurrent tasks or data volume. Your application still owns its task queue, business execution and retries. If only one process needs rate limiting, a local limiter is usually sufficient.
+The same mechanism can coordinate services sharing one third-party API account, or workers sharing a service's call quota. Use the appropriate quota identity as the resource key, then perform your own operation after a grant. Fairness concerns operation opportunities, not data volume; it does not limit the number of operations in flight.
 
-The rate is implemented with a token bucket, which can allow bursts. If the provider requires a strict “at most five calls in any one-second window,” check its counting rules first: this library does not implement a strict sliding-window counter. The example below uses `burst=1` to reduce consecutive grants.
+**ODPS is a real use case. Shared per-resource quota and fair distribution among waiting clients are the library's responsibilities.**
 
-## How do I integrate it?
+## ODPS example: the 75-per-15-second limit and token-bucket configuration
 
-You need Java 8+ and Redis 5+. The current client uses Jedis for a single Redis node; it does not provide a Redis Cluster adapter.
+`75 / 15 = 5` gives a refill rate, but **five tokens per second on average is not automatically a guarantee of at most 75 commits in every 15-second window**. Burst capacity and actual commit timing also matter.
 
-### 1. Install the dependency
+The current library implements a token bucket, without a separate 15-second window counter. With the default `rate=5, burst=5`, the scenario review reproduced 76 grants in less than fifteen seconds on real Redis. The defaults must not be presented as proof that the ODPS window limit is enforced.
 
-The package is not on Maven Central yet. Run `mvn clean install` in this repository first, then add this to your application's `pom.xml`:
+The example below uses `rate=5, burst=1` for smooth grants, normally at least about 200ms apart. Begin the actual Commit promptly after acquiring; do not collect tokens and submit later in a burst. Production integration must also account for SDK retries, other writers and server-side counting boundaries, reducing the rate for headroom as necessary. **A strict server-side window guarantee remains an integration validation requirement.**
+
+The cited quota concerns per-table write Commit calls. Other Catalog API metadata methods have their own limits; do not apply this number to every Catalog method. [Catalog API limits](https://help.aliyun.com/en/maxcompute/catalogapi-sdk-user-guide)
+
+## Integrating with existing consumers
+
+Requires Java 8+ and Redis 5+. The package is not on Maven Central yet. Run `mvn clean install` in this repository, then add:
 
 ```xml
 <dependency>
@@ -80,72 +129,75 @@ The package is not on Maven Central yet. Run `mvn clean install` in this reposit
 </dependency>
 ```
 
-Your application also needs an SLF4J implementation for logging.
-
-### 2. Create the limiter at startup
-
-Use the same configuration and Redis address in all three programs. Create one limiter per process and share it within that process.
+### 1. Create one limiter per consumer process
 
 ```java
 import io.github.longxiaoyun.fairgrant.*;
 import java.util.UUID;
 
 FairGrantConfig config = FairGrantConfig.builder()
-    .ratePerSec(5.0) // Combined rate for the account, NOT five calls per program
-    .burst(1.0)     // Save at most one opportunity, avoiding a batch of immediate calls
+    .keyPrefix("odps:commit:")
+    .ratePerSec(5.0) // Token refill rate per table across ALL nodes
+    .burst(1.0)     // Smooth grants instead of accumulating commit tokens
+    .fallbackMode(FairGrantConfig.FallbackMode.DENY)
     .build();
 
-// Local demo address; in deployment, all programs must use the same Redis service.
+// Local demo address; all thirty deployed nodes must connect to the same Redis service.
 RedisFairGrantLimiter limiter = FairGrantLimiters.redis("127.0.0.1", 6379, config);
-
-String clientId = UUID.randomUUID().toString(); // Once at process startup
-String resourceKey = "document-api:account-001"; // API and account sharing this quota
+String clientId = UUID.randomUUID().toString(); // Generate once at process startup
 ```
 
-The two identifiers serve different purposes:
+The process shares this limiter across tables. Different resourceKeys select independent table buckets.
 
-| Parameter | Meaning in the example | What should each program use? |
-|---|---|---|
-| `resourceKey` | The shared quota for the document API and account-001 | The same value in A, B and C. |
-| `clientId` | Which program is asking for a turn | A different value in each process, stable throughout its lifetime. |
+| Parameter | Value |
+|---|---|
+| `resourceKey` | Complete destination table identity, such as `demo:tableA`, identical across nodes. Include project, schema namespace and table when schema namespaces are enabled. |
+| `clientId` | Stable, unique consumer process identity; distinguish multiple JVMs on one host. |
 
-Resource names are lowercased. A different account with an independent quota can use a different resourceKey.
+Do not append Kafka partition, the message's column-structure hash, local batch ID or ODPS partition value to a table's quota key: that would split one table into independent buckets. The column structure carried in a message is distinct from a MaxCompute schema namespace. Resource names are lowercased.
 
-### 3. Ask for a permit before each business call
+### 2. Acquire for a ready batch immediately before Commit
+
+For Tunnel, acquire at this boundary: create UploadSession → write blocks and close the writer → acquire a commit token → `UploadSession.commit(blocks)`. Do not acquire before a lengthy upload. [Official interface documentation](https://help.aliyun.com/en/maxcompute/uploadsession)
+
+Assume the application has selected and fixed a `readyBatch`, with all preparation required before the actual Commit complete:
 
 ```java
+String resourceKey = "demo:tableA"; // Derive from readyBatch's destination table identity
 AcquireResult result = limiter.tryAcquire(resourceKey, clientId);
 
 if (result.isGranted()) {
-    callRecognitionApi(document);              // Call the API for this file now
+    commitPreparedBatchOnce(readyBatch); // Perform this one actual Commit promptly
 } else if (result.getStatus() == AcquireResult.Status.ERROR) {
-    reportLimiterError(result.getDetail());     // Investigate a config or Redis data error
+    retainBatchAndAlert(readyBatch, result.getDetail());
 } else {
-    retryLater(document, result.getRetryAfterMs()); // Keep the file and ask again later
+    scheduleSameBatch(readyBatch, result.getRetryAfterMs()); // Keep locally; acquire again later
 }
 ```
 
-`callRecognitionApi`, `reportLimiterError` and `retryLater` stand for your application's code. `tryAcquire` returns a result instead of sleeping until quota becomes available.
+These three business methods belong to your consumer; they are not Kafka/ODPS APIs provided by the library. Use one submission coordinator per node/table to prevent two threads from committing the same batch.
 
-Each successful acquisition covers one business call; no release is required. If the program cancels waiting work and has no other waiting work for this resource, call `limiter.clearPending(resourceKey, clientId)` to leave the queue. Call `limiter.close()` at shutdown to close the Redis pool created in this example.
+- **One token covers one actual Commit attempt.** If Commit fails and another call is needed, acquire a new token instead of reusing one grant for unlimited retries.
+- Both acquisition and Commit can involve network waits. Do not sleep for tokens on the Kafka poll thread; use your batch scheduler for retries.
+- Keep the batch on WAIT. Memory bounds, consumer pause/resume and safe Kafka offset advancement are application responsibilities; buffering a message in memory is not durable ODPS delivery.
+- When cancelling waiting work, call clearPending only if this node has no other ready batches for that table. No token release is needed after a normal grant.
+- On Redis failure, this example uses DENY to pause grants. LOCAL_SHARE and ALLOW cannot preserve the global per-table quota guarantee.
 
-By default, an unavailable Redis produces `WAIT`, pausing new business calls. If a program crashes without leaving the queue, a subsequent access removes its position after the waiting lease expires. The default lease is five seconds.
+## Scope and further reading
 
-## Further usage
+The repository provides **shared per-resource token buckets and fair token distribution among clients with ready work**. It does not own Kafka consumption, table-structure parsing, local batching, ODPS Commit or offset management.
 
-Every successful ordinary acquisition consumes new quota. If a Redis response is lost and you want to retry **the same permit acquisition**, use `tryAcquireRequest` with a requestId. That is separate from making another business API call after a failure; see the reference for details.
-
-- [Configuration, acquisition retries, failure modes and internals](docs/reference.md)
-- [Migrating from an older SNAPSHOT](docs/reference.md#migrating-from-the-old-snapshot): the new Redis data format must not be mixed with old clients.
-- [中文说明](README.zh-CN.md)
+- [Review against the actual Kafka → ODPS scenario (Chinese)](docs/scenario-review.zh-CN.md)
+- [Configuration, acquisition retries, waiting leases and internals](docs/reference.md)
+- [Migration](docs/reference.md#migrating-from-the-old-snapshot): the old main-branch implementation and the PR's v2 implementation must not run together.
 
 ## Development and tests
 
 ```bash
-mvn clean test                # Unit tests and mock Redis tests
-mvn -Preal-redis clean verify  # Also run real Redis and multi-JVM end-to-end tests
+mvn clean test
+mvn -Preal-redis clean verify
 ```
 
-The second command requires a local `redis-server`. Tests start a temporary Redis and four independent JVMs that perform 40 actual test HTTP calls, checking the combined quota and waiting order. See the [verification reference](docs/reference.md#build-and-end-to-end-validation).
+The second command requires a local redis-server. It starts temporary Redis instances and validates multi-JVM grants and test HTTP calls. It does not connect to production Kafka or ODPS and does not replace validation of the actual ingestion pipeline. See [test coverage](docs/reference.md#build-and-end-to-end-validation).
 
-Issues and pull requests are welcome. [Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE).
